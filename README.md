@@ -5,9 +5,12 @@
 - CMake 项目管理
 - Linux 服务器的使用
 - shell 脚本
+- epoll 
 ## 学习日志
 - stage1 : 实现简单的socket连接
 - stage2 : 增加错误判断 `errif` ; 实现 echo 服务器 ; 重构CMAKE,规范基于目标的配置
+- stage3 : 使用 非阻塞 ET 式 epoll 监听 fd ; 使用面向对象重构文件 ;学习复杂依赖关系的类如何编写 .h 和 .cpp 文件
+
 ## quick start
 - 1.cmake build
 - 2.参见 scripts/SCRIPTS.md

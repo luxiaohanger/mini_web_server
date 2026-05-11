@@ -14,58 +14,42 @@
 #include <string.h>  // 提供 strerror()
 
 // include/头文件
+#include "Epoll.h"
 #include "Server.h"
 #include "error_solve.h"
 
 // define
-#define MAX_EVENTS 100
 #define READ_BUFFER 1024
 
-int prev_main() {
-    std::cout << "here is server\n";
-
-    int listen_fd = socket(PF_INET, SOCK_STREAM, 0);
-    errif(listen_fd == -1, "socket create error");
-
-    int opt = 1;
-    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    struct sockaddr_in addr;
-    addr.sin_family = AF_INET;          // 地址族
-    addr.sin_addr.s_addr = INADDR_ANY;  // 监听所有网卡（0.0.0.0）
-    addr.sin_port = htons(8888);        // htons 是为了处理大端/小端字节序转换
-
-    errif(bind(listen_fd, (sockaddr*)&addr, sizeof(addr)) == -1,
-          "socket bind error");
-
-    errif(listen(listen_fd, 128) == -1, "socket listen error");
-
-    int epfd = epoll_create1(0);
-    errif(epfd == -1, "epoll create error");
-
-    // 创建两个 epoll_event
-    // 类型变量，一个是缓冲数组，一个是用于填充、复用的临时体
-    epoll_event events[MAX_EVENTS], ev;
+Epoll::Epoll(/* args */) {
+    std::cout << "Epoll construct!\n";
+    this->epfd = epoll_create1(0);
+    errif(this->epfd == -1, "epoll create error");
     memset(events, 0, sizeof(events));
-    memset(&ev, 0, sizeof(ev));
+}
 
-    // 填充ev，并加入epoll进行监视
+Epoll::~Epoll() {}
+
+void Epoll::addEvent(int listen_fd) {
+    ev = {};
     ev.data.fd = listen_fd;
     ev.events = EPOLLIN | EPOLLET;
 
     // 设置非阻塞
     setnonblocking(listen_fd);
     epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);
+}
 
-    // IO
+void Epoll::solveEvent(Server& s) {
     while (true) {
         int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
         errif(nfds == -1, "epoll wait error");
 
         for (int i = 0; i < nfds; ++i) {
-            if (events[i].data.fd == listen_fd) {
+            if (s.listen_set.find(events[i].data.fd) != s.listen_set.end()) {
                 // 新连接
                 // 加载 clnt_fd
+                int listen_fd = events[i].data.fd;
                 struct sockaddr_in clnt_addr;
                 socklen_t clnt_addr_len = sizeof(clnt_addr);
                 bzero(&clnt_addr, sizeof(clnt_addr));
@@ -115,13 +99,4 @@ int prev_main() {
             }
         }
     }
-    close(listen_fd);
-    return 0;
-}
-
-int main() {
-    Server s;
-    s.mylisten(8888);
-    s.startIO();
-    return 0;
 }
