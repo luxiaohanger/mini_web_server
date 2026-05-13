@@ -13,8 +13,8 @@
 - stage1 : 实现简单的socket连接
 - stage2 : 增加错误判断 `errif` ; 实现 echo 服务器 ; 重构CMAKE , 规范基于目标的配置
 - stage3 : 使用 非阻塞 ET 式 epoll 监听 fd ，实现单文件[代码雏形](/src/server/prev_main.cpp); 使用面向对象重构文件 ; 学习复杂依赖关系的类如何编写 .h 和 .cpp 文件
-- stage4 : 将裸露文件描述符封装为 `Channel`；实现简单的 Reactor 架构和事件驱动、任务分发；尝试自己重构高度耦合的类；新建docs文档，记录架构变化，实现[架构设计v1](/docs/DESIGN_1.md)
-- stage5 : 彻底重构设计架构，实现工业级 C++ 网络库的核心雏形，详见[架构设计v2](/docs/DESIGN_2.md)
+- stage4 : 将裸露文件描述符封装为 `Channel`；实现简单的 Reactor 架构和事件驱动、任务分发；尝试自己重构高度耦合的类；新建docs文档，记录架构变化，实现[架构设计v1](/docs/DESIGN_v1.md)
+- stage5 : 彻底重构设计架构，实现工业级 C++ 网络库的核心雏形，详见[架构设计v2](/docs/DESIGN_v2.md)
 
 ## quick start
 - 1.cmake build
