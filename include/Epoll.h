@@ -4,7 +4,8 @@
 
 #include <vector>
 
-#include "Channel.h"
+class Channel;
+class EventLoop;
 #include "Server.h"
 
 class Epoll {

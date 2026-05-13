@@ -1,38 +1,48 @@
-#include <sys/socket.h>  // 提供 socket(), bind(), listen(), accept(), setsockopt()
-#include <unistd.h>      // 提供 close(), read(), write()
-
-#include <iostream>
-
-// 错误处理与日志
-#include <errno.h>   // 提供 errno 变量
-#include <string.h>  // 提供 strerror()
-
-// include/头文件
-#include "Channel.h"
-#include "Epoll.h"
-#include "EventLoop.h"
 #include "Server.h"
+
+#include <functional>
+
+#include "Acceptor.h"
+#include "Connection.h"
+#include "EventLoop.h"
+#include "Socket.h"
 #include "error_solve.h"
 
-Server::Server() {
-    std::cout << "Server construct!\n";
-    ep = new Epoll();
-    eloop = new EventLoop(ep);
-}
+Server::Server() { eloop = new EventLoop(); }
 
 Server::~Server() {
-    for (auto it = listen_set.begin(); it != listen_set.end(); ++it) {
-        if (is_valid_fd(*it)) close(*it);
+    delete eloop;
+    for (int i = 0; i < Acceptors.size(); ++i) {
+        delete Acceptors[i];
     }
-    if (ep) delete ep;
-    ep = nullptr;
-    if (eloop) delete eloop;
-    eloop = nullptr;
+    for (auto it = Connections.begin(); it != Connections.end(); ++it) {
+        delete it->second;
+    }
 }
 
 void Server::listenPort(int port) {
-    Channel* channel = new Channel(ep, 0);
-    channel->addListen(port);
+    for (int i = 0; i < Acceptors.size(); ++i) {
+        if (port == Acceptors[i]->getPort()) return;
+    }
+    Acceptor* acceptor = new Acceptor(eloop, port);
+    acceptor->setNewConnectionCallBack(
+        std::bind(&Server::handleNewConnection, this, std::placeholders::_1));
+    Acceptors.push_back(acceptor);
+    acceptor->startListen();
 }
 
 void Server::startLoop() { eloop->loop(); }
+
+void Server::handleNewConnection(Socket* sck) {
+    Connection* connection = new Connection(eloop, sck);
+    Connections[sck->getFd()] = connection;
+    connection->setDeleteConnectionCallBack(std::bind(
+        &Server::handleDeleteConnection, this, std::placeholders::_1));
+    connection->startConnect();
+}
+
+void Server::handleDeleteConnection(int fd) {
+    auto connection = Connections[fd];
+    Connections.erase(fd);
+    delete connection;
+}

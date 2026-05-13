@@ -1,22 +1,23 @@
 #pragma once
-#include <unordered_set>
-
-#include "Server.h"
+#include <unordered_map>
+#include <vector>
+class Socket;
 class EventLoop;
-class Epoll;
+class Acceptor;
+class Connection;
 
 class Server {
    private:
-    std::unordered_set<int> listen_set;
     EventLoop* eloop;
-    Epoll* ep;
+    std::vector<Acceptor*> Acceptors;
+    std::unordered_map<int, Connection*> Connections;
+    void handleNewConnection(Socket* sck);
+    void handleDeleteConnection(int fd);
 
    public:
     Server();
     ~Server();
 
-    // listen the target port
-    // add channel to epoll
     void listenPort(int port);
     void startLoop();
 };

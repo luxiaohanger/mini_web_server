@@ -11,13 +11,19 @@
 
 // 错误处理与日志
 #include <errno.h>   // 提供 errno 变量
-#include <string.h>  // 提供 strerror()
+#include <string.h>  // 提供 strerror(),memset()
 
 #include "error_solve.h"
 
 // define
 #define MAX_EVENTS 100
 #define READ_BUFFER 1024
+
+void setnonblocking(int fd) {
+    // file control
+    // 先 file get flag ,位掩码修改后 file set flag
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+}
 
 int prev_main() {
     std::cout << "here is server\n";

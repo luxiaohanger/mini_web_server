@@ -3,8 +3,11 @@
 #include "Channel.h"
 #include "Epoll.h"
 
-EventLoop::EventLoop(Epoll* ep) : ep(ep) {}
-EventLoop::~EventLoop() {}
+EventLoop::EventLoop() { ep = new Epoll(); }
+EventLoop::~EventLoop() {
+    if (ep) delete ep;
+    ep = nullptr;
+}
 
 void EventLoop::loop() {
     while (true) {
@@ -14,3 +17,5 @@ void EventLoop::loop() {
         }
     }
 }
+
+void EventLoop::updateChannel(Channel* channel) { ep->updateChannel(channel); }

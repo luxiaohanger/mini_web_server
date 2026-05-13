@@ -1,15 +1,13 @@
-#include <iostream>
+#include "Epoll.h"
 
-// 提供 memset()
 #include <string.h>
 
-// include/头文件
-#include "Epoll.h"
+#include "Channel.h"
+#include "EventLoop.h"
 #include "Server.h"
 #include "error_solve.h"
 
 Epoll::Epoll() {
-    std::cout << "Epoll construct!\n";
     this->epfd = epoll_create1(0);
     errif(this->epfd == -1, "epoll create error");
     memset(events, 0, sizeof(events));
@@ -22,7 +20,6 @@ void Epoll::updateChannel(Channel* channel) {
     memset(&ev, 0, sizeof(ev));
     ev.data.ptr = channel;
     ev.events = channel->getEvents();
-    setnonblocking(fd);
     if (!channel->getInEpoll()) {
         errif(epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) == -1, "epoll add error");
         channel->setInEpoll();
