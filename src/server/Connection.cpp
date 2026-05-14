@@ -2,18 +2,19 @@
 
 #include <errno.h>
 #include <string.h>
-#include <unistd.h>
 
 #include <functional>
 #include <iostream>
 
+#include "Buffer.h"
 #include "Channel.h"
 #include "Socket.h"
-#define READ_BUFFER 1024
 
 Connection::Connection(EventLoop* eloop, Socket* sck) : eloop(eloop), sck(sck) {
     channel = new Channel(eloop, sck->getFd());
     channel->setReadCallBack(std::bind(&Connection::handleReadCallBack, this));
+    readBuffer = new Buffer();
+    writeBuffer = new Buffer();
 }
 
 void Connection::startConnect() { channel->enableReading(); }
@@ -27,18 +28,18 @@ Connection::~Connection() {
         delete channel;
         channel = nullptr;
     }
+    delete readBuffer;
+    delete writeBuffer;
 }
 
 void Connection::handleReadCallBack() {
-    char buf[READ_BUFFER];
-    int clnt_sockfd = sck->getFd();
     while (true) {
-        memset(buf, 0, sizeof(buf));
-        ssize_t read_byte = read(clnt_sockfd, buf, sizeof(buf));
+        ssize_t read_byte = readBuffer->sckToBuffer(sck);
         if (read_byte > 0) {
-            std::cout << "msg from client " << clnt_sockfd << " : " << buf
-                      << '\n';
-            write(clnt_sockfd, buf, read_byte);
+            std::cout << "msg from client " << sck->getFd() << " : "
+                      << readBuffer->peek() << '\n';
+            readBuffer->bufToBuf(writeBuffer, read_byte);
+            writeBuffer->bufferToSck(sck, read_byte);
         } else if (read_byte == -1 && errno == EINTR) {
             // 被信号中断，继续读取
             std::cout << "interrupted! continue.\n";
@@ -51,7 +52,7 @@ void Connection::handleReadCallBack() {
         } else if (read_byte == 0) {  // EOF，客户端断开连接
             std::cout << "EOF\n";
             // 通知上层（Server）销毁这个 Connection 对象。
-            deleteConnectionCallBack(clnt_sockfd);
+            deleteConnectionCallBack(sck);
             break;
         }
     }

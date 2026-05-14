@@ -35,14 +35,14 @@ void Server::startLoop() { eloop->loop(); }
 
 void Server::handleNewConnection(Socket* sck) {
     Connection* connection = new Connection(eloop, sck);
-    Connections[sck->getFd()] = connection;
+    Connections[sck] = connection;
     connection->setDeleteConnectionCallBack(std::bind(
         &Server::handleDeleteConnection, this, std::placeholders::_1));
     connection->startConnect();
 }
 
-void Server::handleDeleteConnection(int fd) {
-    auto connection = Connections[fd];
-    Connections.erase(fd);
+void Server::handleDeleteConnection(Socket* sck) {
+    auto connection = Connections[sck];
+    Connections.erase(sck);
     delete connection;
 }

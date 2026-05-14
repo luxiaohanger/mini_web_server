@@ -3,19 +3,22 @@
 class Socket;
 class EventLoop;
 class Channel;
+class Buffer;
 
 class Connection {
    private:
     EventLoop* eloop;
     Socket* sck;
     Channel* channel;
-    std::function<void(int)> deleteConnectionCallBack;
+    Buffer* readBuffer;
+    Buffer* writeBuffer;
+    std::function<void(Socket*)> deleteConnectionCallBack;
     void handleReadCallBack();
 
    public:
     Connection(EventLoop* eloop, Socket* sck);
     ~Connection();
-    void setDeleteConnectionCallBack(std::function<void(int)> cb) {
+    void setDeleteConnectionCallBack(std::function<void(Socket*)> cb) {
         deleteConnectionCallBack = std::move(cb);
     }
 

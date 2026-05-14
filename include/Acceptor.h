@@ -10,7 +10,6 @@ class Acceptor {
     // 在其中执行 callback
     void handleRead();
 
-    int listenFd;
     int port;
     Socket* listenSck;
     EventLoop* eloop;

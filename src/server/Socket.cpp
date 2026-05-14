@@ -39,3 +39,24 @@ Socket::~Socket() {
         fd = -1;
     }
 }
+
+Socket* Socket::acceptConnection() {
+    struct sockaddr_in clnt_addr{};
+    socklen_t clnt_addr_len = sizeof(clnt_addr);
+    int clnt_sockfd = accept(fd, (sockaddr*)&clnt_addr, &clnt_addr_len);
+    errif(clnt_sockfd == -1, "socket accept error");
+    Socket* sck = new Socket(clnt_sockfd, port, clnt_addr);
+    return sck;
+}
+
+void Socket::startListen() {
+    errif(listen(fd, 128) == -1, "socket listen error");
+}
+
+ssize_t Socket::sckRead(void* buf, size_t count) {
+    return read(fd, buf, count);
+}
+
+ssize_t Socket::sckWrite(const void* buf, size_t count) {
+    return write(fd, buf, count);
+}

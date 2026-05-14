@@ -10,9 +10,9 @@ class Server {
    private:
     EventLoop* eloop;
     std::vector<Acceptor*> Acceptors;
-    std::unordered_map<int, Connection*> Connections;
+    std::unordered_map<Socket*, Connection*> Connections;
     void handleNewConnection(Socket* sck);
-    void handleDeleteConnection(int fd);
+    void handleDeleteConnection(Socket* sck);
 
    public:
     Server();

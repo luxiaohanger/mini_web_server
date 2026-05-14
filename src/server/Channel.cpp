@@ -10,12 +10,7 @@
 #define READ_BUFFER 1024
 
 Channel::Channel(EventLoop* eloop, int fd)
-    : eloop(eloop),
-      fd(fd),
-      events(0),
-      revents(0),
-      inEpoll(false),
-      isListen(false) {}
+    : eloop(eloop), fd(fd), events(0), revents(0), inEpoll(false) {}
 
 void Channel::enableReading() {
     events |= EPOLLIN | EPOLLET;

@@ -4,6 +4,7 @@
 
 class EventLoop;
 
+// 描述 fd 状态，但不持有 fd
 class Channel {
    private:
     EventLoop* eloop;
@@ -17,9 +18,6 @@ class Channel {
 
     // 区别新fd和旧fd
     bool inEpoll;
-
-    // 标识监听fd
-    bool isListen;
 
     std::function<void()> readCallBack;
 
