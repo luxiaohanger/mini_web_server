@@ -1,12 +1,34 @@
+#pragma once
+#include <functional>
+#include <mutex>
+#include <queue>
+
 class Epoll;
 class Channel;
 class EventLoop {
    private:
     Epoll* ep;
+    // 负责通知loop的fd
+    int eloopFd;
+    // 包装eloop_fd
+    Channel* eloopChannel;
+    std::mutex queue_mtx;
+
+    // 等待被调用的善后函数
+    std::queue<std::function<void()>> tasks;
+
+    // 停止标识
+    bool stop;
+
+    // 必须设置读回调并读取fd缓冲区全部数据
+    // ET触发的原理不是缓冲区数据有变化
+    // 而是缓冲区数据有无的状态切换
+    void readCallback();
 
    public:
     EventLoop();
     ~EventLoop();
     void loop();
     void updateChannel(Channel* channel);
+    void enqueueTask(std::function<void()> func);
 };

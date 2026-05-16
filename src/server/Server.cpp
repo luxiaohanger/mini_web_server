@@ -6,9 +6,13 @@
 #include "Connection.h"
 #include "EventLoop.h"
 #include "Socket.h"
+#include "ThreadPool.h"
 #include "error_solve.h"
 
-Server::Server() { eloop = new EventLoop(); }
+Server::Server() {
+    eloop = new EventLoop();
+    threadpool = new ThreadPool();
+}
 
 Server::~Server() {
     delete eloop;
@@ -36,6 +40,9 @@ void Server::startLoop() { eloop->loop(); }
 void Server::handleNewConnection(Socket* sck) {
     Connection* connection = new Connection(eloop, sck);
     Connections[sck] = connection;
+    connection->setProcess([this](std::function<void()> task) {
+        this->threadpool->enqueue(task);
+    });
     connection->setDeleteConnectionCallBack(std::bind(
         &Server::handleDeleteConnection, this, std::placeholders::_1));
     connection->startConnect();

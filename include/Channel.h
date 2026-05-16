@@ -20,6 +20,7 @@ class Channel {
     bool inEpoll;
 
     std::function<void()> readCallBack;
+    std::function<void()> writeCallBack;
 
    public:
     Channel(EventLoop* eloop, int fd);
@@ -28,6 +29,9 @@ class Channel {
     // 设置/创建 监听文件可读、ET触发
     // （新channel）挂载到 epoll
     void enableReading();
+
+    void enableWriting();
+    void disableWriting();
 
     // 设置文件可监听，并且为 LT 模式
     // 仅对新创建的未挂载 channel 可用
@@ -51,5 +55,9 @@ class Channel {
     // 从而channel本身无需关心自己的来源
     void setReadCallBack(std::function<void()> cb) {
         this->readCallBack = std::move(cb);
+    }
+
+    void setWriteCallBack(std::function<void()> cb) {
+        this->writeCallBack = std::move(cb);
     }
 };

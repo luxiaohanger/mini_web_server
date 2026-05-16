@@ -8,11 +8,14 @@
 
 #include "Buffer.h"
 #include "Channel.h"
+#include "EventLoop.h"
 #include "Socket.h"
 
 Connection::Connection(EventLoop* eloop, Socket* sck) : eloop(eloop), sck(sck) {
     channel = new Channel(eloop, sck->getFd());
     channel->setReadCallBack(std::bind(&Connection::handleReadCallBack, this));
+    channel->setWriteCallBack(
+        std::bind(&Connection::handleWriteCallBack, this));
     readBuffer = new Buffer();
     writeBuffer = new Buffer();
 }
@@ -20,38 +23,104 @@ Connection::Connection(EventLoop* eloop, Socket* sck) : eloop(eloop), sck(sck) {
 void Connection::startConnect() { channel->enableReading(); }
 
 Connection::~Connection() {
-    if (sck) {
-        delete sck;
-        sck = nullptr;
-    }
-    if (channel) {
-        delete channel;
-        channel = nullptr;
-    }
+    delete channel;
+    delete sck;
     delete readBuffer;
     delete writeBuffer;
 }
 
-void Connection::handleReadCallBack() {
+void Connection::readFromSck() {
     while (true) {
         ssize_t read_byte = readBuffer->sckToBuffer(sck);
         if (read_byte > 0) {
-            std::cout << "msg from client " << sck->getFd() << " : "
-                      << readBuffer->peek() << '\n';
-            readBuffer->bufToBuf(writeBuffer, read_byte);
-            writeBuffer->bufferToSck(sck, read_byte);
         } else if (read_byte == -1 && errno == EINTR) {
             // 被信号中断，继续读取
-            std::cout << "interrupted! continue.\n";
             continue;
         } else if (read_byte == -1 &&
                    ((errno == EAGAIN) || (errno == EWOULDBLOCK))) {
             // 非阻塞IO中，这个条件表示数据全部读取完毕
-            std::cout << "read OK!\n";
             break;
         } else if (read_byte == 0) {  // EOF，客户端断开连接
-            std::cout << "EOF\n";
             // 通知上层（Server）销毁这个 Connection 对象。
+            deleteConnectionCallBack(sck);
+            break;
+        }
+    }
+}
+
+void Connection::handleReadCallBack() { Echo(); }
+
+void Connection::Echo() {
+    readFromSck();
+    std::cout << "msg from client " << sck->getFd() << " : "
+              << readBuffer->peek() << '\n';
+
+    // 调用线程池任务线程处理业务逻辑
+    process([this]() {
+        this->processEcho();
+
+        // 处理完成后向eloop善后队列注入任务
+        // 注入函数同时完成了唤醒功能
+        eloop->enqueueTask([this]() { this->trySendToSck(); });
+    });
+}
+
+void Connection::processEcho() {
+    readBuffer->bufToBuf(writeBuffer, readBuffer->readable());
+}
+
+void Connection::trySendToSck() {
+    if (writeBuffer->readable() == 0) return;
+    // 专门为连续中断设计的循环
+    while (writeBuffer->readable() != 0) {
+        auto send_bytes =
+            writeBuffer->bufferToSck(sck, writeBuffer->readable());
+        if (send_bytes > 0) {
+            if (writeBuffer->readable() == 0) {
+                channel->disableWriting();
+                return;
+            } else {
+                channel->enableWriting();
+                break;
+            }
+        } else {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                channel->enableWriting();
+                break;
+            } else if (errno == EINTR) {
+                continue;
+            } else {
+                // 真正的错误（如 EPIPE 客户端断开），进行异常处理
+                deleteConnectionCallBack(sck);
+                break;
+            }
+        }
+    }
+}
+
+void Connection::handleWriteCallBack() {
+    // EPOLLOUT 触发事件
+    if (writeBuffer->readable() == 0) {
+        channel->disableWriting();
+        return;
+    }
+
+    while (writeBuffer->readable() > 0) {
+        auto n = writeBuffer->bufferToSck(sck, writeBuffer->readable());
+        if (n > 0) {
+            if (writeBuffer->readable() == 0) {
+                // 彻底发完，立刻注销写事件
+                channel->disableWriting();
+                break;
+            }
+        } else if (n == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // 内核缓冲区又满了，保持写事件监听，等待下一次 Epoll 唤醒
+                break;
+            }
+            if (errno == EINTR) continue;  // 信号中断，继续写
+
+            // 其他致命错误
             deleteConnectionCallBack(sck);
             break;
         }
