@@ -34,7 +34,9 @@ _deps/
 ### --- 2. 编辑器与 IDE (VS Code / Cursor / JetBrains) ---
 ### ====================================================================
 .vscode/
-.cursor/
+.cursor*/
+cursor*/
+cursor*
 *.code-workspace
 
 # 如果你偶尔用 CLion 或 PyCharm

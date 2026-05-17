@@ -1,10 +1,10 @@
 #include "Epoll.h"
 
 #include <string.h>
+#include <unistd.h>
 
 #include "Channel.h"
 #include "EventLoop.h"
-#include "Server.h"
 #include "error_solve.h"
 
 Epoll::Epoll() {
@@ -13,7 +13,10 @@ Epoll::Epoll() {
     memset(events, 0, sizeof(events));
 }
 
-Epoll::~Epoll() {}
+Epoll::~Epoll() {
+    if (epfd >= 0) ::close(epfd);
+    epfd = -1;
+}
 
 void Epoll::updateChannel(Channel* channel) {
     int fd = channel->getFd();
@@ -22,7 +25,7 @@ void Epoll::updateChannel(Channel* channel) {
     ev.events = channel->getEvents();
     if (!channel->getInEpoll()) {
         errif(epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) == -1, "epoll add error");
-        channel->setInEpoll();
+        channel->changeInEpoll(true);
     } else {
         errif(epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ev) == -1,
               "epoll modify error");
@@ -39,4 +42,12 @@ std::vector<Channel*> Epoll::poll() {
         ans.push_back(channel);
     }
     return ans;
+}
+
+void Epoll::removeChannel(Channel* channel) {
+    if (!channel->getInEpoll()) return;
+    int fd = channel->getFd();
+    errif(epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr) == -1,
+          "channel delete error");
+    channel->changeInEpoll(false);
 }

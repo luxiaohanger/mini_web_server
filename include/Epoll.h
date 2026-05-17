@@ -6,7 +6,6 @@
 
 class Channel;
 class EventLoop;
-#include "Server.h"
 
 class Epoll {
    private:
@@ -23,4 +22,5 @@ class Epoll {
     // 同步 channel 的最新信息，更新epoll
     // 挂载新channel
     void updateChannel(Channel* channel);
+    void removeChannel(Channel* channel);
 };

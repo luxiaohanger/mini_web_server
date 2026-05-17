@@ -22,6 +22,8 @@ class Channel {
     std::function<void()> readCallBack;
     std::function<void()> writeCallBack;
 
+    void remove();
+
    public:
     Channel(EventLoop* eloop, int fd);
     ~Channel();
@@ -38,13 +40,15 @@ class Channel {
     // 如果设置 ET，一次 acceptor 的 handleRead 就要无限循环
     void enableListen();
 
+    void disableAll();
+
     int getFd() { return fd; }
     uint32_t getEvents() { return events; }
     bool getInEpoll() { return inEpoll; }
 
     // 把wait返回新事件写入拷贝channel，准备处理
     void setRevents(uint32_t revents) { this->revents = revents; }
-    void setInEpoll() { inEpoll = true; }
+    void changeInEpoll(bool status) { inEpoll = status; }
 
     // 根据 revents 处理事件
     void handle();

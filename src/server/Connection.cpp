@@ -11,7 +11,8 @@
 #include "EventLoop.h"
 #include "Socket.h"
 
-Connection::Connection(EventLoop* eloop, Socket* sck) : eloop(eloop), sck(sck) {
+Connection::Connection(EventLoop* eloop, Socket* sck)
+    : eloop(eloop), sck(sck), alive(true) {
     channel = new Channel(eloop, sck->getFd());
     channel->setReadCallBack(std::bind(&Connection::handleReadCallBack, this));
     channel->setWriteCallBack(
@@ -40,9 +41,11 @@ void Connection::readFromSck() {
                    ((errno == EAGAIN) || (errno == EWOULDBLOCK))) {
             // 非阻塞IO中，这个条件表示数据全部读取完毕
             break;
-        } else if (read_byte == 0) {  // EOF，客户端断开连接
+        } else if (read_byte == 0) {
+            // EOF，客户端断开连接
             // 通知上层（Server）销毁这个 Connection 对象。
-            deleteConnectionCallBack(sck);
+            // 修改存活标志，禁止异步线程推进
+            alive = false;
             break;
         }
     }
@@ -52,6 +55,11 @@ void Connection::handleReadCallBack() { Echo(); }
 
 void Connection::Echo() {
     readFromSck();
+    if (!alive) {
+        std::cout << "client " << sck->getFd() << " connection break\n";
+        deleteConnectionCallBack(sck);
+        return;
+    }
     std::cout << "msg from client " << sck->getFd() << " : "
               << readBuffer->peek() << '\n';
 
@@ -91,10 +99,15 @@ void Connection::trySendToSck() {
                 continue;
             } else {
                 // 真正的错误（如 EPIPE 客户端断开），进行异常处理
-                deleteConnectionCallBack(sck);
+                alive = false;
                 break;
             }
         }
+    }
+    if (!alive) {
+        std::cout << "client " << sck->getFd() << " connection break\n";
+        deleteConnectionCallBack(sck);
+        return;
     }
 }
 
@@ -121,8 +134,13 @@ void Connection::handleWriteCallBack() {
             if (errno == EINTR) continue;  // 信号中断，继续写
 
             // 其他致命错误
-            deleteConnectionCallBack(sck);
+            alive = false;
             break;
         }
+    }
+    if (!alive) {
+        std::cout << "client " << sck->getFd() << " connection break\n";
+        deleteConnectionCallBack(sck);
+        return;
     }
 }

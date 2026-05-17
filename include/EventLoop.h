@@ -31,4 +31,5 @@ class EventLoop {
     void loop();
     void updateChannel(Channel* channel);
     void enqueueTask(std::function<void()> func);
+    void removeChannel(Channel* channel);
 };

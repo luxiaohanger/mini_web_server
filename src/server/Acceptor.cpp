@@ -24,5 +24,6 @@ Acceptor::~Acceptor() {
 void Acceptor::startListen() { listenSck->startListen(); }
 
 void Acceptor::handleRead() {
-    newConnectionCallBack(listenSck->acceptConnection());
+    auto res = listenSck->acceptConnection();
+    if (res) newConnectionCallBack(res);
 }

@@ -29,7 +29,14 @@ void Channel::enableListen() {
     eloop->updateChannel(this);
 }
 
-Channel::~Channel() {}
+void Channel::disableAll() {
+    events = 0;
+    eloop->updateChannel(this);
+}
+
+void Channel::remove() { eloop->removeChannel(this); }
+
+Channel::~Channel() { remove(); }
 
 void Channel::handle() {
     // 每个事件都判断，可能同时存在

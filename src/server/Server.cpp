@@ -15,13 +15,14 @@ Server::Server() {
 }
 
 Server::~Server() {
-    delete eloop;
     for (int i = 0; i < Acceptors.size(); ++i) {
         delete Acceptors[i];
     }
     for (auto it = Connections.begin(); it != Connections.end(); ++it) {
         delete it->second;
     }
+    delete eloop;
+    delete threadpool;
 }
 
 void Server::listenPort(int port) {

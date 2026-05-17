@@ -82,3 +82,5 @@ void EventLoop::enqueueTask(std::function<void()> func) {
     auto res = ::write(eloopFd, &one, sizeof(one));
     errif(res < 0, "eloopFd write error");
 }
+
+void EventLoop::removeChannel(Channel* channel) { ep->removeChannel(channel); }

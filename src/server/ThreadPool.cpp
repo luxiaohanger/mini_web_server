@@ -1,6 +1,6 @@
 #include "ThreadPool.h"
 
-ThreadPool::ThreadPool(size_t n) {
+ThreadPool::ThreadPool(size_t n) : stop(false) {
     workers.reserve(n);
     for (int i = 0; i < n; ++i) {
         // 用 lambda 表达式作为thread构造函数参数

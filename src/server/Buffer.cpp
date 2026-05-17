@@ -70,7 +70,8 @@ ssize_t Buffer::sckToBuffer(Socket* sck) {
 ssize_t Buffer::bufferToSck(Socket* sck, size_t count) {
     errif(count > this->readable(), "Not have enough data");
     auto res = sck->sckWrite(&buf[readIdx], count);
-    readIdx += count;
+    // 这里应当使用实际传出的数据修改 buffer 状态
+    if (res > 0) readIdx += res;
     if (readIdx == writeIdx) {
         readIdx = 0;
         writeIdx = 0;

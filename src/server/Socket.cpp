@@ -1,5 +1,6 @@
 #include "Socket.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -43,10 +44,18 @@ Socket::~Socket() {
 Socket* Socket::acceptConnection() {
     struct sockaddr_in clnt_addr{};
     socklen_t clnt_addr_len = sizeof(clnt_addr);
-    int clnt_sockfd = accept(fd, (sockaddr*)&clnt_addr, &clnt_addr_len);
-    errif(clnt_sockfd == -1, "socket accept error");
-    Socket* sck = new Socket(clnt_sockfd, port, clnt_addr);
-    return sck;
+    while (true) {
+        int clnt_sockfd = accept(fd, (sockaddr*)&clnt_addr, &clnt_addr_len);
+        if (clnt_sockfd >= 0) {
+            Socket* sck = new Socket(clnt_sockfd, port, clnt_addr);
+            return sck;
+        } else if (errno == EINTR)
+            continue;
+        else if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return nullptr;
+        errif(true, "socket accept error");
+        return nullptr;
+    }
 }
 
 void Socket::startListen() {

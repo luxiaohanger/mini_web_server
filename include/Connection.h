@@ -12,6 +12,7 @@ class Connection {
     Channel* channel;
     Buffer* readBuffer;
     Buffer* writeBuffer;
+    bool alive;
     std::function<void(Socket*)> deleteConnectionCallBack;
     std::function<void(std::function<void()>)> process;
     void handleReadCallBack();
