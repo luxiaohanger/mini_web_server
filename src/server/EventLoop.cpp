@@ -17,19 +17,8 @@ EventLoop::EventLoop() : stop(false) {
 }
 
 EventLoop::~EventLoop() {
-    // 关闭任务队列,执行完剩余任务
-    {
-        std::unique_lock<std::mutex> lock(queue_mtx);
-        stop = true;
-
-        while (!tasks.empty()) {
-            auto it = std::move(tasks.front());
-            it();
-            tasks.pop();
-        }
-    }
-    delete ep;
     delete eloopChannel;
+    delete ep;
     ::close(eloopFd);
 }
 
@@ -74,6 +63,7 @@ void EventLoop::readCallback() {
 }
 
 void EventLoop::enqueueTask(std::function<void()> func) {
+    if (stop) return;
     {
         std::unique_lock<std::mutex> lock(queue_mtx);
         tasks.push(std::move(func));

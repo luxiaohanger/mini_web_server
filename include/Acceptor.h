@@ -6,18 +6,16 @@ class Channel;
 class Socket;
 class Acceptor {
    private:
-    // 当 Channel 发现 ListenFD 可读时
-    // 在其中执行 callback
-    void handleRead();
-
     int port;
     Socket* listenSck;
     EventLoop* eloop;
-
     Channel* acceptChannel;  // 包装 ListenFD 的 Channel
 
     // 回调函数顺便传入对方地址，减少额外的系统调用
     std::function<void(Socket*)> newConnectionCallBack;
+    // 当 Channel 发现 ListenFD 可读时
+    // 在其中执行 callback
+    void handleRead();
 
    public:
     Acceptor(EventLoop* loop, int port);

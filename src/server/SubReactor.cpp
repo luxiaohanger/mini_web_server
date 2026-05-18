@@ -1,0 +1,46 @@
+#include "SubReactor.h"
+
+#include "Connection.h"
+#include "EventLoop.h"
+#include "error_solve.h"
+
+SubReactor::SubReactor() { eloop = new EventLoop(); }
+
+SubReactor::~SubReactor() { delete eloop; }
+
+void SubReactor::addConnection(
+    Socket* sck, std::function<void(std::function<void()>)> taskSubmit) {
+    eloop->enqueueTask([this, sck, taskSubmit]() {
+        auto conn = std::make_shared<Connection>(eloop, sck);
+        conn->setProcess(taskSubmit);
+        conn->setRemoveConnectionCallBack(
+            [this](Socket* sck) { this->removeConnection(sck); });
+        Connections[sck] = conn;
+        conn->startConnect();
+    });
+}
+
+void SubReactor::removeConnection(Socket* sck) { Connections.erase(sck); }
+
+void SubReactor::start() {
+    // 所有在 loop 函数中处理的事件都运行在子线程上
+    eloopThread = std::thread([this]() { eloop->loop(); });
+}
+
+void SubReactor::stop() {
+    // 让 sub 给所有连接下达停止信号
+    // 回收conn
+    // 不保证善后函数全部完成
+    // 注册循环退出信号
+    eloop->enqueueTask([this]() {
+        for (auto it : Connections) it.second->stop();
+        while (!Connections.empty()) {
+            auto it = Connections.begin();
+            Connections.erase(it->first);
+        }
+        eloop->stopLoop();
+    });
+
+    // 等待循环退出，回收 sub 线程
+    if (eloopThread.joinable()) eloopThread.join();
+}

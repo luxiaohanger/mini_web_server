@@ -15,10 +15,8 @@ Acceptor::Acceptor(EventLoop* eloop, int port) : eloop(eloop), port(port) {
 }
 
 Acceptor::~Acceptor() {
-    if (listenSck) delete listenSck;
-    listenSck = nullptr;
-    if (acceptChannel) delete acceptChannel;
-    acceptChannel = nullptr;
+    delete acceptChannel;
+    delete listenSck;
 }
 
 void Acceptor::startListen() { listenSck->startListen(); }

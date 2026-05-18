@@ -3,6 +3,6 @@
 int main() {
     Server s;
     s.listenPort(8888);
-    s.startLoop();
+    s.start();
     return 0;
 }

@@ -11,12 +11,10 @@
 #include "EventLoop.h"
 #include "Socket.h"
 
-Connection::Connection(EventLoop* eloop, Socket* sck)
-    : eloop(eloop), sck(sck), alive(true) {
+Connection::Connection(EventLoop* eloop, Socket* sck) : eloop(eloop), sck(sck) {
     channel = new Channel(eloop, sck->getFd());
-    channel->setReadCallBack(std::bind(&Connection::handleReadCallBack, this));
-    channel->setWriteCallBack(
-        std::bind(&Connection::handleWriteCallBack, this));
+    channel->setReadCallBack([this]() { this->handleReadCallBack(); });
+    channel->setWriteCallBack([this]() { this->handleWriteCallBack(); });
     readBuffer = new Buffer();
     writeBuffer = new Buffer();
 }
@@ -43,9 +41,7 @@ void Connection::readFromSck() {
             break;
         } else if (read_byte == 0) {
             // EOF，客户端断开连接
-            // 通知上层（Server）销毁这个 Connection 对象。
-            // 修改存活标志，禁止异步线程推进
-            alive = false;
+            handleDead();
             break;
         }
     }
@@ -54,27 +50,39 @@ void Connection::readFromSck() {
 void Connection::handleReadCallBack() { Echo(); }
 
 void Connection::Echo() {
+    // 提前建立 self ，否则 IO 结束就立即销毁
+    auto self = shared_from_this();
     readFromSck();
-    if (!alive) {
-        std::cout << "client " << sck->getFd() << " connection break\n";
-        deleteConnectionCallBack(sck);
-        return;
-    }
+
     std::cout << "msg from client " << sck->getFd() << " : "
               << readBuffer->peek() << '\n';
 
     // 调用线程池任务线程处理业务逻辑
-    process([this]() {
-        this->processEcho();
+    // 捕获 self，保证 conn 生命周期在此期间延续
+    int n = readBuffer->readable();
+    std::string data;
+    // data 的数据区空间不足，先扩容再填充
+    data.resize(n);
+    readBuffer->dataOut(data.data(), n);
+    // 注意异步线程执行不能按引用捕获，因为使用时栈空间可能已经释放
+    // 可以使用移动语义，按值捕获
+    process([self, data = std::move(data)]() {
+        // 这里是任务线程在执行
+        std::string res;
+        self->processEcho(data, res);
 
         // 处理完成后向eloop善后队列注入任务
         // 注入函数同时完成了唤醒功能
-        eloop->enqueueTask([this]() { this->trySendToSck(); });
+        self->eloop->enqueueTask([self, res = std::move(res)]() {
+            // 这里是 own subReactor 线程在执行善后任务
+            self->writeBuffer->dataIn(res.data(), res.size());
+            self->trySendToSck();
+        });
     });
 }
 
-void Connection::processEcho() {
-    readBuffer->bufToBuf(writeBuffer, readBuffer->readable());
+void Connection::processEcho(const std::string& data, std::string& res) {
+    res = data;
 }
 
 void Connection::trySendToSck() {
@@ -99,15 +107,10 @@ void Connection::trySendToSck() {
                 continue;
             } else {
                 // 真正的错误（如 EPIPE 客户端断开），进行异常处理
-                alive = false;
+                handleDead();
                 break;
             }
         }
-    }
-    if (!alive) {
-        std::cout << "client " << sck->getFd() << " connection break\n";
-        deleteConnectionCallBack(sck);
-        return;
     }
 }
 
@@ -134,13 +137,19 @@ void Connection::handleWriteCallBack() {
             if (errno == EINTR) continue;  // 信号中断，继续写
 
             // 其他致命错误
-            alive = false;
+            handleDead();
             break;
         }
     }
-    if (!alive) {
-        std::cout << "client " << sck->getFd() << " connection break\n";
-        deleteConnectionCallBack(sck);
-        return;
-    }
+}
+
+void Connection::handleDead() {
+    std::cout << "client " << sck->getFd() << " connection break\n";
+    removeConnectionCallBack(sck);
+    return;
+}
+
+void Connection::stop() {
+    // 先禁用 channel，拒绝外界连接
+    channel->disableAll();
 }

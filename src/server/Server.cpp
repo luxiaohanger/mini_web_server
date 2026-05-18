@@ -1,56 +1,41 @@
 #include "Server.h"
 
-#include <functional>
-
 #include "Acceptor.h"
-#include "Connection.h"
-#include "EventLoop.h"
-#include "Socket.h"
+#include "MainReactor.h"
+#include "SubReactor.h"
 #include "ThreadPool.h"
 #include "error_solve.h"
 
-Server::Server() {
-    eloop = new EventLoop();
-    threadpool = new ThreadPool();
+Server::Server() : subIdx(0) {
+    int n = std::thread::hardware_concurrency();
+    if (n == 0) n = 4;
+    threadpool = new ThreadPool(n);
+    mainReactor = new MainReactor();
+    mainReactor->setNewConnectionCallback(
+        [this](Socket* sck) { handleNewConnection(sck); });
+    SubReactors.reserve(n);
+    for (int i = 0; i < n; ++i) {
+        SubReactors.emplace_back(new SubReactor());
+    }
 }
 
 Server::~Server() {
-    for (int i = 0; i < Acceptors.size(); ++i) {
-        delete Acceptors[i];
-    }
-    for (auto it = Connections.begin(); it != Connections.end(); ++it) {
-        delete it->second;
-    }
-    delete eloop;
+    delete mainReactor;
+    for (auto it : SubReactors) it->stop();
+    // 等待worker退出，防止注册函数访问越界
     delete threadpool;
+    for (auto it : SubReactors) delete it;
 }
 
-void Server::listenPort(int port) {
-    for (int i = 0; i < Acceptors.size(); ++i) {
-        if (port == Acceptors[i]->getPort()) return;
-    }
-    Acceptor* acceptor = new Acceptor(eloop, port);
-    acceptor->setNewConnectionCallBack(
-        std::bind(&Server::handleNewConnection, this, std::placeholders::_1));
-    Acceptors.push_back(acceptor);
-    acceptor->startListen();
-}
+void Server::listenPort(int port) { mainReactor->listenPort(port); }
 
-void Server::startLoop() { eloop->loop(); }
+void Server::start() {
+    for (auto it : SubReactors) it->start();
+    mainReactor->start();
+}
 
 void Server::handleNewConnection(Socket* sck) {
-    Connection* connection = new Connection(eloop, sck);
-    Connections[sck] = connection;
-    connection->setProcess([this](std::function<void()> task) {
-        this->threadpool->enqueue(task);
-    });
-    connection->setDeleteConnectionCallBack(std::bind(
-        &Server::handleDeleteConnection, this, std::placeholders::_1));
-    connection->startConnect();
-}
-
-void Server::handleDeleteConnection(Socket* sck) {
-    auto connection = Connections[sck];
-    Connections.erase(sck);
-    delete connection;
+    SubReactors[subIdx]->addConnection(
+        sck, [this](std::function<void()> f) { this->threadpool->enqueue(f); });
+    subIdx = (subIdx + 1) % SubReactors.size();
 }

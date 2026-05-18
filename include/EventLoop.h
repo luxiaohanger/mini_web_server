@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include <queue>
@@ -17,8 +18,8 @@ class EventLoop {
     // 等待被调用的善后函数
     std::queue<std::function<void()>> tasks;
 
-    // 停止标识
-    bool stop;
+    // worker 注册善后函数时发生竞态
+    std::atomic<bool> stop;
 
     // 必须设置读回调并读取fd缓冲区全部数据
     // ET触发的原理不是缓冲区数据有变化
@@ -32,4 +33,5 @@ class EventLoop {
     void updateChannel(Channel* channel);
     void enqueueTask(std::function<void()> func);
     void removeChannel(Channel* channel);
+    void stopLoop() { stop = true; }
 };
