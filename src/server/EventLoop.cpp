@@ -16,7 +16,11 @@ EventLoop::EventLoop() : stop(false) {
     eloopChannel->enableReading();
 }
 
-EventLoop::~EventLoop() { ::close(eloopFd); }
+EventLoop::~EventLoop() {
+    eloopChannel.reset();
+    ep.reset();
+    ::close(eloopFd);
+}
 
 void EventLoop::loop() {
     while (!stop) {

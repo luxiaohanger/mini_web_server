@@ -9,7 +9,7 @@
 - 影响：worker 线程可能读取未定义值，导致线程池随机退出、卡住或行为不稳定。
 - 根因：`stop` 是普通成员变量，构造函数未显式初始化。
 - 修复：构造函数初始化为 `stop(false)`；线程池文件名对齐为 `ThreadPool.cpp`。
-- 验证建议：Linux 侧多次启动 server/client，确认任务稳定执行。
+- 验证建议：多次启动 server/client，确认任务稳定执行。
 
 ## FIX-002 `Buffer::bufferToSck()` 错误推进读指针
 
@@ -122,7 +122,8 @@
 - 位置：`src/server/EventLoop.cpp`
 - 影响：`Channel::~Channel()` 依赖 `EventLoop::removeChannel()`，如果先删 `Epoll` 会访问已释放资源。
 - 根因：`EventLoop` 析构中先删 `ep`，后删 `eloopChannel`。
-- 修复：先 `delete eloopChannel`，再 `delete ep`，最后关闭 `eloopFd`。
+- 修复：先销毁 `eloopChannel`，再销毁 `ep`，最后 `close(eloopFd)`（早期为 `delete`；现见 FIX-025 `reset` 写法）。
+- 备注：智能指针重构后曾再次出现错误顺序（OPEN-005），已由 FIX-025 纠正。
 
 ## FIX-014 `EventLoop::stop` 跨线程访问未同步
 
@@ -189,4 +190,62 @@
 - 修复：移除 `alive` 状态门控；读到 EOF 时从连接表移除连接，但由 `shared_ptr self` 延长 `Connection` 生命周期，保证 EOF 前已读数据继续进入业务处理并尝试写回；写失败时再按错误路径处理。
 - 备注：该实现选择严格 TCP 语义：`read == 0` 表示对端不再发送，不代表本端不能继续发送。
 
+## FIX-020 附记：EOF 与 `handleDead` / `disableAll`（随 FIX-023 更新）
+
+- 说明日期：2026-05-19
+- 结论（FIX-023 后）：读 EOF 只进入 **`peerClose`**，不 `remove`、不 `disableAll()`；**`dead`** 时才 `handleDead()` → `remove`；`stop()` 仍 `disableAll()`。
+- EOF 后无新可读数据；写排空与 `EPOLLOUT` 在 `peerClose` 阶段完成后再转入 `dead`（见 OPEN-007）。
+
+## FIX-021 `Connection` 构造函数字形参遮蔽成员 `sck`
+
+- 修复日期：2026-05-19（`229739a`）
+- 状态：Fixed
+- 位置：`src/server/Connection.cpp` 构造函数
+- 现象：`make_shared<Connection>` / `addConnection` 时 SIGSEGV；`Socket::getFd(this=0x0)`。
+- 根因：形参与成员同名 `sck`，初始化列表 `sck(std::move(sck))` 后形参已空；体内 `sck->getFd()` 命中**形参**而非成员。`errif(this->sck.get()==nullptr)` 只检查成员，故不触发。
+- 修复：形参改名为 `sock`（与成员 `sck` 区分），`sck(std::move(sock))` 后体内 `sck->getFd()` 解析为成员（约第 18 行）。
+- 验证：`bt` 栈顶为 `Connection::Connection` 构造；单 client 短消息 echo 不崩溃。
+
+## FIX-022 析构路径半强制 `stop_half_force`
+
+- 修复日期：2026-05-19（`229739a`）
+- 状态：Fixed（部分语义，完整 graceful 仍见 OPEN-001）
+- 位置：`Server`、`MainReactor`、`SubReactor`、`ThreadPool`
+- 现象：`~Server()` 为空；`ThreadPool` 析构不 `join` worker；进程退出时资源与线程未收束。
+- 修复：`Server::~Server()` 调用 `stop_half_force()`：依次 `mainReactor->stop()`、各 `SubReactor::stop()`（含 `join` I/O 线程）、`threadpool->stop()`（`join` worker）。`ThreadPool` 析构体改为空，依赖先 `stop()`。
+- 备注：属 force/half-force **骨架**，供将来停服/析构用；当前 `main` 在 `start()` 常驻，用户通常杀进程退出，不走完整停服路径（见 OPEN-001/002 暂缓）。
+
+## FIX-023 `ConnState`：EOF 仅 `peerClose`，写错误才 `remove`
+
+- 修复日期：2026-05-19（本地同步，待服务器提交）
+- 状态：Fixed（与 FIX-024 一并关闭原 **OPEN-006**）
+- 位置：`include/Connection.h`、`src/server/Connection.cpp`
+- 现象（修复前）：读 EOF 即 `handleDead()` → `Connections.erase`，写未完成时 `Connection`/`Channel` 可能先析构（OPEN-006）。
+- 修复：
+  - `enum class ConnState { connected, peerClose, dead }`；构造默认 `connected`。
+  - `readFromSck()` 中 `read==0` 只设 `state = peerClose`，**不**调用 `removeConnectionCallBack`。
+  - 写致命错误：`state = dead` 后 `handleDead()` → 从 `SubReactor` 移除。
+- 与 FIX-020：保留「EOF 后仍可写」；表项在 `peerClose` 阶段仍由 map 持有 `shared_ptr`，**写未完成前不析构**，消除「`EPOLLOUT` 时 `Channel`/`Connection` 已释放」主因（OPEN-006）。
+- 备注：FIX-020 附记中「EOF 时 `handleDead` 只 remove」的描述已过时；现改为 **仅 `dead` 时 remove**。
+
+## FIX-024 `working` 计数与 `peerClose` 收束
+
+- 修复日期：2026-05-19（本地同步，待服务器提交）
+- 状态：Fixed
+- 位置：`include/Connection.h`、`src/server/Connection.cpp`
+- 修复：
+  - 成员 `int working`：投递 `process` 前 `working++`；owner 线程善后 `enqueueTask` 内 **`working--` 后** `dataIn` + `trySendToSck`。
+  - 纯 EOF 无数据：`Echo` 中 `n==0 && peerClose && working==0 && writeBuffer 空` → `dead` + `handleDead()`。
+  - 写排空：`trySendToSck` / `handleWriteCallBack` 在 `disableWriting` 后若 `peerClose && working==0` → `dead` + `handleDead()`。
+- 语义：`peerClose && working==0` 表示不会再有新 worker，且已登记的 worker 善后已执行到 `--`（写回任务已进入或已完成该次 `trySendToSck` 调用链）。
+- 验证建议：client 发消息后退出；纯连接关闭无数据；大消息触发 `EPOLLOUT` 后再关 client。
+- 说明：Channel 回调仍为 `[this]`；在 `dead` 之前由 `Connections` 的 `shared_ptr` 保活即可，**不另记 OPEN 残留**。`weak_ptr` 仅为可选风格加固，非必做。
+
+## FIX-025 `EventLoop` 析构顺序（对齐 FIX-013）
+
+- 修复日期：2026-05-19（本地同步，待服务器提交）
+- 状态：Fixed（原 OPEN-005）
+- 位置：`src/server/EventLoop.cpp` `~EventLoop()`（约 19–23 行）
+- 现象：析构体先 `close(eloopFd)` 再析构成员，`~Channel` 对已关闭 fd 做 `epoll_ctl DEL`。
+- 修复：显式 `eloopChannel.reset(); ep.reset(); ::close(eloopFd);`——先拆 channel（`removeChannel`），再拆 epoll，最后关 eventfd。
 
