@@ -10,9 +10,11 @@
 #include "Channel.h"
 #include "EventLoop.h"
 #include "Socket.h"
+#include "error_solve.h"
 
-Connection::Connection(EventLoop* eloop, std::unique_ptr<Socket> sck)
-    : eloop(eloop), sck(std::move(sck)) {
+Connection::Connection(EventLoop* eloop, std::unique_ptr<Socket> sock)
+    : eloop(eloop), sck(std::move(sock)) {
+    errif(this->sck.get() == nullptr, "conn get nullptr ");
     channel = std::make_unique<Channel>(eloop, sck->getFd());
     channel->setReadCallBack([this]() { this->handleReadCallBack(); });
     channel->setWriteCallBack([this]() { this->handleWriteCallBack(); });

@@ -23,4 +23,5 @@ class Server {
 
     void listenPort(int port);
     void start();
+    void stop_half_force();
 };

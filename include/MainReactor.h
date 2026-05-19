@@ -22,4 +22,5 @@ class MainReactor {
     }
     void listenPort(int port);
     void start();
+    void stop();
 };

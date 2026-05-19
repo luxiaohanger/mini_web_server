@@ -24,7 +24,7 @@ class ThreadPool {
 
     // 状态标志，作为线程池即将消亡的停止信号
     // 也用于使被唤醒的任务线程顺利结束
-    bool stop;
+    bool stop_;
 
    public:
     // 构造函数：启动指定数量的工作线程
@@ -38,6 +38,8 @@ class ThreadPool {
 
     // 析构函数：通知所有线程退出并安全释放资源
     ~ThreadPool();
+
+    void stop();
 
     // 禁止拷贝构造和赋值操作（资源所有权唯一）
     ThreadPool(const ThreadPool&) = delete;
@@ -66,7 +68,7 @@ auto ThreadPool::enqueue(F&& f, Args&&... args)
         std::unique_lock<std::mutex> lock(queue_mtx);
 
         // 如果线程池已经触发了 stop 停止信号，严禁继续提交新任务！
-        if (stop) {
+        if (stop_) {
             throw std::runtime_error("enqueue on stopped ThreadPool");
         }
 

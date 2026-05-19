@@ -19,7 +19,13 @@ Server::Server() : subIdx(0) {
     }
 }
 
-Server::~Server() {}
+Server::~Server() { stop_half_force(); }
+
+void Server::stop_half_force() {
+    mainReactor->stop();
+    for (int i = 0; i < SubReactors.size(); ++i) SubReactors[i]->stop();
+    threadpool->stop();
+}
 
 void Server::listenPort(int port) { mainReactor->listenPort(port); }
 

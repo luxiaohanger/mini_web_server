@@ -1,6 +1,6 @@
 #include "ThreadPool.h"
 
-ThreadPool::ThreadPool(size_t n) : stop(false) {
+ThreadPool::ThreadPool(size_t n) : stop_(false) {
     workers.reserve(n);
     for (int i = 0; i < n; ++i) {
         // 用 lambda 表达式作为thread构造函数参数
@@ -14,11 +14,11 @@ ThreadPool::ThreadPool(size_t n) : stop(false) {
 
                     // 等待条件：线程池停止，或者任务队列不为空
                     this->cv.wait(lock, [this]() {
-                        return this->stop || !this->tasks.empty();
+                        return this->stop_ || !this->tasks.empty();
                     });
 
                     // 如果线程池停止了，且队列里的任务都干完了，线程安全退出
-                    if (this->stop && this->tasks.empty()) {
+                    if (this->stop_ && this->tasks.empty()) {
                         return;  // 结束 Lambda 函数，意味着线程销毁
                     }
 
@@ -36,11 +36,12 @@ ThreadPool::ThreadPool(size_t n) : stop(false) {
     }
 }
 
-ThreadPool::~ThreadPool() {
+ThreadPool::~ThreadPool() {}
+
+void ThreadPool::stop() {
     {
-        // 加锁修改，保证 cpu 可见一致性
         std::unique_lock<std::mutex> lock(this->queue_mtx);
-        stop = true;
+        stop_ = true;
     }
 
     // 唤醒所有线程退出

@@ -6,7 +6,7 @@
 
 MainReactor::MainReactor() { eloop = std::make_unique<EventLoop>(); }
 
-MainReactor::~MainReactor() { eloop->stopLoop(); }
+MainReactor::~MainReactor() {}
 
 void MainReactor::listenPort(int port) {
     if (Acceptors.find(port) != Acceptors.end()) return;
@@ -18,3 +18,12 @@ void MainReactor::listenPort(int port) {
 }
 
 void MainReactor::start() { eloop->loop(); }
+
+void MainReactor::stop() {
+    eloop->stopLoop();
+
+    while (!Acceptors.empty()) {
+        auto it = Acceptors.begin();
+        Acceptors.erase(it->first);
+    }
+}
