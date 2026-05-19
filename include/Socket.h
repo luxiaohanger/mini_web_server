@@ -1,6 +1,8 @@
 #pragma once
 #include <arpa/inet.h>
 
+#include <memory>
+
 // fd 的持有者，封装裸露的 fd 和 socket 系统调用
 // 上层类只持有 Socket 指针，并进行调用
 class Socket {

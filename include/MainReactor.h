@@ -1,5 +1,6 @@
 #pragma once
 #include <functional>
+#include <memory>
 #include <unordered_map>
 
 class EventLoop;
@@ -8,15 +9,15 @@ class Acceptor;
 
 class MainReactor {
    private:
-    EventLoop* eloop;
-    std::unordered_map<int, Acceptor*> Acceptors;
+    std::unique_ptr<EventLoop> eloop;
+    std::unordered_map<int, std::unique_ptr<Acceptor>> Acceptors;
 
-    std::function<void(Socket* sck)> newConnectionCallback;
+    std::function<void(Socket*)> newConnectionCallback;
 
    public:
     MainReactor();
     ~MainReactor();
-    void setNewConnectionCallback(std::function<void(Socket* sck)> cb) {
+    void setNewConnectionCallback(std::function<void(Socket*)> cb) {
         newConnectionCallback = std::move(cb);
     }
     void listenPort(int port);

@@ -10,17 +10,13 @@
 EventLoop::EventLoop() : stop(false) {
     eloopFd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     errif(eloopFd < 0, "eloopFd create error");
-    ep = new Epoll();
-    eloopChannel = new Channel(this, eloopFd);
-    eloopChannel->setReadCallBack(std::bind(&EventLoop::readCallback, this));
+    ep = std::make_unique<Epoll>();
+    eloopChannel = std::make_unique<Channel>(this, eloopFd);
+    eloopChannel->setReadCallBack([this]() { this->readCallback(); });
     eloopChannel->enableReading();
 }
 
-EventLoop::~EventLoop() {
-    delete eloopChannel;
-    delete ep;
-    ::close(eloopFd);
-}
+EventLoop::~EventLoop() { ::close(eloopFd); }
 
 void EventLoop::loop() {
     while (!stop) {

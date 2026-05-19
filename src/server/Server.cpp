@@ -9,28 +9,22 @@
 Server::Server() : subIdx(0) {
     int n = std::thread::hardware_concurrency();
     if (n == 0) n = 4;
-    threadpool = new ThreadPool(n);
-    mainReactor = new MainReactor();
+    threadpool = std::make_unique<ThreadPool>(n);
+    mainReactor = std::make_unique<MainReactor>();
     mainReactor->setNewConnectionCallback(
         [this](Socket* sck) { handleNewConnection(sck); });
     SubReactors.reserve(n);
     for (int i = 0; i < n; ++i) {
-        SubReactors.emplace_back(new SubReactor());
+        SubReactors.emplace_back(std::make_unique<SubReactor>());
     }
 }
 
-Server::~Server() {
-    delete mainReactor;
-    for (auto it : SubReactors) it->stop();
-    // 等待worker退出，防止注册函数访问越界
-    delete threadpool;
-    for (auto it : SubReactors) delete it;
-}
+Server::~Server() {}
 
 void Server::listenPort(int port) { mainReactor->listenPort(port); }
 
 void Server::start() {
-    for (auto it : SubReactors) it->start();
+    for (int i = 0; i < SubReactors.size(); ++i) SubReactors[i]->start();
     mainReactor->start();
 }
 

@@ -11,10 +11,10 @@ class Buffer;
 class Connection : public std::enable_shared_from_this<Connection> {
    private:
     EventLoop* eloop;
-    Socket* sck;
-    Channel* channel;
-    Buffer* readBuffer;
-    Buffer* writeBuffer;
+    std::unique_ptr<Socket> sck;
+    std::unique_ptr<Channel> channel;
+    std::unique_ptr<Buffer> readBuffer;
+    std::unique_ptr<Buffer> writeBuffer;
 
     // 由于conn 和 sck 生命周期绑定，因此不会出现 fd 复用导致输出错误
     // 根据严格的tcp语义和socket特性，读到EOF不代表不能写
@@ -43,7 +43,7 @@ class Connection : public std::enable_shared_from_this<Connection> {
     void handleDead();
 
    public:
-    Connection(EventLoop* eloop, Socket* sck);
+    Connection(EventLoop* eloop, std::unique_ptr<Socket> sck);
     ~Connection();
 
     void setRemoveConnectionCallBack(std::function<void(Socket*)> cb) {

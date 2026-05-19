@@ -47,7 +47,7 @@ Socket* Socket::acceptConnection() {
     while (true) {
         int clnt_sockfd = accept(fd, (sockaddr*)&clnt_addr, &clnt_addr_len);
         if (clnt_sockfd >= 0) {
-            Socket* sck = new Socket(clnt_sockfd, port, clnt_addr);
+            auto sck = new Socket(clnt_sockfd, port, clnt_addr);
             return sck;
         } else if (errno == EINTR)
             continue;

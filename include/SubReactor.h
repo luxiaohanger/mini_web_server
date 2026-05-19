@@ -12,7 +12,7 @@ class Socket;
 class SubReactor {
    private:
     std::thread eloopThread;
-    EventLoop* eloop;
+    std::unique_ptr<EventLoop> eloop;
     std::unordered_map<Socket*, std::shared_ptr<Connection>> Connections;
 
     // 无需 delete ，直接移除指针

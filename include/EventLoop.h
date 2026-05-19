@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <queue>
 
@@ -8,11 +9,11 @@ class Epoll;
 class Channel;
 class EventLoop {
    private:
-    Epoll* ep;
+    std::unique_ptr<Epoll> ep;
     // 负责通知loop的fd
     int eloopFd;
     // 包装eloop_fd
-    Channel* eloopChannel;
+    std::unique_ptr<Channel> eloopChannel;
     std::mutex queue_mtx;
 
     // 等待被调用的善后函数

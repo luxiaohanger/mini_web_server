@@ -11,26 +11,22 @@
 #include "EventLoop.h"
 #include "Socket.h"
 
-Connection::Connection(EventLoop* eloop, Socket* sck) : eloop(eloop), sck(sck) {
-    channel = new Channel(eloop, sck->getFd());
+Connection::Connection(EventLoop* eloop, std::unique_ptr<Socket> sck)
+    : eloop(eloop), sck(std::move(sck)) {
+    channel = std::make_unique<Channel>(eloop, sck->getFd());
     channel->setReadCallBack([this]() { this->handleReadCallBack(); });
     channel->setWriteCallBack([this]() { this->handleWriteCallBack(); });
-    readBuffer = new Buffer();
-    writeBuffer = new Buffer();
+    readBuffer = std::make_unique<Buffer>();
+    writeBuffer = std::make_unique<Buffer>();
 }
 
 void Connection::startConnect() { channel->enableReading(); }
 
-Connection::~Connection() {
-    delete channel;
-    delete sck;
-    delete readBuffer;
-    delete writeBuffer;
-}
+Connection::~Connection() {}
 
 void Connection::readFromSck() {
     while (true) {
-        ssize_t read_byte = readBuffer->sckToBuffer(sck);
+        ssize_t read_byte = readBuffer->sckToBuffer(sck.get());
         if (read_byte > 0) {
         } else if (read_byte == -1 && errno == EINTR) {
             // 被信号中断，继续读取
@@ -90,7 +86,7 @@ void Connection::trySendToSck() {
     // 专门为连续中断设计的循环
     while (writeBuffer->readable() != 0) {
         auto send_bytes =
-            writeBuffer->bufferToSck(sck, writeBuffer->readable());
+            writeBuffer->bufferToSck(sck.get(), writeBuffer->readable());
         if (send_bytes > 0) {
             if (writeBuffer->readable() == 0) {
                 channel->disableWriting();
@@ -122,7 +118,7 @@ void Connection::handleWriteCallBack() {
     }
 
     while (writeBuffer->readable() > 0) {
-        auto n = writeBuffer->bufferToSck(sck, writeBuffer->readable());
+        auto n = writeBuffer->bufferToSck(sck.get(), writeBuffer->readable());
         if (n > 0) {
             if (writeBuffer->readable() == 0) {
                 // 彻底发完，立刻注销写事件
@@ -145,7 +141,7 @@ void Connection::handleWriteCallBack() {
 
 void Connection::handleDead() {
     std::cout << "client " << sck->getFd() << " connection break\n";
-    removeConnectionCallBack(sck);
+    removeConnectionCallBack(sck.get());
     return;
 }
 

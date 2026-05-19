@@ -2,16 +2,18 @@
 
 #include "Connection.h"
 #include "EventLoop.h"
+#include "Socket.h"
 #include "error_solve.h"
 
-SubReactor::SubReactor() { eloop = new EventLoop(); }
+SubReactor::SubReactor() { eloop = std::make_unique<EventLoop>(); }
 
-SubReactor::~SubReactor() { delete eloop; }
+SubReactor::~SubReactor() {}
 
 void SubReactor::addConnection(
     Socket* sck, std::function<void(std::function<void()>)> taskSubmit) {
     eloop->enqueueTask([this, sck, taskSubmit]() {
-        auto conn = std::make_shared<Connection>(eloop, sck);
+        auto conn = std::make_shared<Connection>(eloop.get(),
+                                                 std::unique_ptr<Socket>(sck));
         conn->setProcess(taskSubmit);
         conn->setRemoveConnectionCallBack(
             [this](Socket* sck) { this->removeConnection(sck); });

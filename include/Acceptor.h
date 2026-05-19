@@ -1,15 +1,15 @@
 #pragma once
 #include <functional>
-
+#include <memory>
 class EventLoop;
 class Channel;
 class Socket;
 class Acceptor {
    private:
     int port;
-    Socket* listenSck;
+    std::unique_ptr<Socket> listenSck;
     EventLoop* eloop;
-    Channel* acceptChannel;  // 包装 ListenFD 的 Channel
+    std::unique_ptr<Channel> acceptChannel;  // 包装 ListenFD 的 Channel
 
     // 回调函数顺便传入对方地址，减少额外的系统调用
     std::function<void(Socket*)> newConnectionCallBack;

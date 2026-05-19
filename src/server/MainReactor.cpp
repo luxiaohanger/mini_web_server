@@ -4,22 +4,17 @@
 #include "EventLoop.h"
 #include "error_solve.h"
 
-MainReactor::MainReactor() { eloop = new EventLoop(); }
+MainReactor::MainReactor() { eloop = std::make_unique<EventLoop>(); }
 
-MainReactor::~MainReactor() {
-    for (auto it : Acceptors) delete it.second;
-    Acceptors.clear();
-    eloop->stopLoop();
-    delete eloop;
-}
+MainReactor::~MainReactor() { eloop->stopLoop(); }
 
 void MainReactor::listenPort(int port) {
     if (Acceptors.find(port) != Acceptors.end()) return;
-    Acceptor* acceptor = new Acceptor(eloop, port);
+    auto acceptor = std::make_unique<Acceptor>(eloop.get(), port);
     acceptor->setNewConnectionCallBack(
         [this](Socket* sck) { newConnectionCallback(sck); });
-    Acceptors[port] = acceptor;
-    acceptor->startListen();
+    Acceptors[port] = std::move(acceptor);
+    Acceptors[port]->startListen();
 }
 
 void MainReactor::start() { eloop->loop(); }

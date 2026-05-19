@@ -1,4 +1,5 @@
 #pragma once
+#include <memory>
 #include <vector>
 class Socket;
 class EventLoop;
@@ -10,9 +11,9 @@ class MainReactor;
 
 class Server {
    private:
-    ThreadPool* threadpool;
-    MainReactor* mainReactor;
-    std::vector<SubReactor*> SubReactors;
+    std::unique_ptr<ThreadPool> threadpool;
+    std::unique_ptr<MainReactor> mainReactor;
+    std::vector<std::unique_ptr<SubReactor>> SubReactors;
     int subIdx;
     void handleNewConnection(Socket* sck);
 
