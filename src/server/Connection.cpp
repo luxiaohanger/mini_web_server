@@ -9,6 +9,7 @@
 #include "Buffer.h"
 #include "Channel.h"
 #include "EventLoop.h"
+#include "HttpProcess.h"
 #include "Socket.h"
 #include "error_solve.h"
 
@@ -23,6 +24,7 @@ Connection::Connection(EventLoop* eloop, std::unique_ptr<Socket> sock)
     channel->setWriteCallBack([this]() { this->handleWriteCallBack(); });
     readBuffer = std::make_unique<Buffer>();
     writeBuffer = std::make_unique<Buffer>();
+    httpProcess_ = std::make_unique<HttpProcess>();
 }
 
 void Connection::startConnect() { channel->enableReading(); }
@@ -48,57 +50,67 @@ void Connection::readFromSck() {
     }
 }
 
-void Connection::handleReadCallBack() { Echo(); }
+void Connection::handleReadCallBack() { onHttp(); }
 
-void Connection::Echo() {
+void Connection::checkEmptyReadAfterEof() {
+    if (state == ConnState::peerClose && working == 0 &&
+        writeBuffer->readable() == 0) {
+        state = ConnState::dead;
+        handleDead();
+    }
+}
+
+void Connection::sendHttpOnLoop(const std::string& resp, bool keepAlive) {
+    writeBuffer->dataIn(resp.data(), resp.size());
+    trySendToSck();
+    if (!keepAlive) {
+        channel->disableReading();
+        state = ConnState::peerClose;
+    }
+}
+
+void Connection::onHttp() {
     auto self = shared_from_this();
     readFromSck();
 
-    int n = readBuffer->readable();
-    if (n != 0)
-        std::cout << "msg from client " << sck->getFd() << " : "
-                  << readBuffer->peek() << '\n';
-    else {
-        // 此时说明 peer 发送 EOF 包
-        // 不调用 working 处理空包
-        // 若处理完毕，结束 conn
-        if (state == ConnState::peerClose && working == 0 &&
-            writeBuffer->readable() == 0) {
-            state = ConnState::dead;
-            handleDead();
-        }
-        // 说明没有处理完毕
-        // 不从此处结束conn,直接退出即可
-        // 由后续写失败结束conn
+    if (readBuffer->readable() == 0) {
+        checkEmptyReadAfterEof();
         return;
     }
 
-    std::string data;
-    // data 的数据区空间不足，先扩容再填充
-    data.resize(n);
-    readBuffer->dataOut(data.data(), n);
-    // 注意异步线程执行不能按引用捕获，因为使用时栈空间可能已经释放
-    // 可以使用移动语义，按值捕获
-    working++;
-    process([self, data = std::move(data)]() {
-        // 这里是任务线程在执行
-        std::string res;
-        self->processEcho(data, res);
+    while (true) {
+        ParseResult r = httpProcess_->parse(readBuffer.get());
 
-        // 处理完成后向eloop善后队列注入任务
-        // 注入函数同时完成了唤醒功能
-        self->eloop->enqueueTask([self, res = std::move(res)]() {
-            // 这里是 own subReactor 线程在执行善后任务
-            // 先改计数器
-            self->working--;
-            self->writeBuffer->dataIn(res.data(), res.size());
-            self->trySendToSck();
+        if (r == ParseResult::kNeedMore) break;
+
+        if (r == ParseResult::kLineTooLong) {
+            state = ConnState::dead;
+            handleDead();
+            return;
+        }
+
+        if (r == ParseResult::kError) {
+            sendHttpOnLoop(HttpProcess::build400(), false);
+            httpProcess_->reset();
+            checkEmptyReadAfterEof();
+            return;
+        }
+
+        // kComplete — 合法 GET
+        HttpRequest req = httpProcess_->releaseRequest();
+        working++;
+        process([self, req = std::move(req)]() {
+            std::string resp = HttpProcess::buildResponse(req);
+            const bool keepAlive = req.keepAlive;
+            self->eloop->enqueueTask(
+                [self, resp = std::move(resp), keepAlive]() {
+                    self->working--;
+                    self->sendHttpOnLoop(resp, keepAlive);
+                    self->checkEmptyReadAfterEof();
+                });
         });
-    });
-}
-
-void Connection::processEcho(const std::string& data, std::string& res) {
-    res = data;
+        // 粘包：继续 while，不在此 break
+    }
 }
 
 void Connection::trySendToSck() {

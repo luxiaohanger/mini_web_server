@@ -31,7 +31,7 @@ class Channel {
     // 设置/创建 监听文件可读、ET触发
     // （新channel）挂载到 epoll
     void enableReading();
-
+    void disableReading();
     void enableWriting();
     void disableWriting();
 

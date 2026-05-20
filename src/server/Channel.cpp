@@ -13,6 +13,11 @@ void Channel::enableReading() {
     eloop->updateChannel(this);
 }
 
+void Channel::disableReading() {
+    events &= ~EPOLLIN;
+    eloop->updateChannel(this);
+}
+
 void Channel::enableWriting() {
     events |= EPOLLOUT;
     eloop->updateChannel(this);

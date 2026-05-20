@@ -102,3 +102,21 @@ void Buffer::bufToBuf(Buffer* peer, size_t count) {
         this->bufToBuf(peer, count);
     }
 }
+
+size_t Buffer::findCRLF() {
+    const size_t n = readable();
+    if (n < 2) return std::string::npos;
+    for (size_t i = 0; i + 1 < n; ++i) {
+        if (buf[readIdx + i] == '\r' && buf[readIdx + i + 1] == '\n') return i;
+    }
+    return std::string::npos;
+}
+
+void Buffer::retrieve(size_t n) {
+    errif(n > readable(), "retrieve: not enough data");
+    readIdx += n;
+    if (readIdx == writeIdx) {
+        readIdx = 0;
+        writeIdx = 0;
+    }
+}

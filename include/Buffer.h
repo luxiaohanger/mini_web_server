@@ -1,6 +1,7 @@
 #pragma once
 #include <sys/types.h>
 
+#include <string>
 #include <string_view>
 
 #include "vector"
@@ -38,4 +39,10 @@ class Buffer {
         // 仅仅返回一个视图，零拷贝
         return std::string_view(&buf[readIdx], readable());
     }
+
+    // HTTP 解析辅助：在可读区查找 \r\n，找不到返回 npos
+    size_t findCRLF();
+
+    // 消费可读区前 n 字节（HTTP 状态机用）
+    void retrieve(size_t n);
 };

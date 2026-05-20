@@ -7,6 +7,7 @@ class Socket;
 class EventLoop;
 class Channel;
 class Buffer;
+class HttpProcess;
 
 enum class ConnState { connected, peerClose, dead };
 
@@ -17,6 +18,7 @@ class Connection : public std::enable_shared_from_this<Connection> {
     std::unique_ptr<Channel> channel;
     std::unique_ptr<Buffer> readBuffer;
     std::unique_ptr<Buffer> writeBuffer;
+    std::unique_ptr<HttpProcess> httpProcess_;
 
     // 由于conn 和 sck 生命周期绑定，因此不会出现 fd 复用导致输出错误
     // 根据严格的tcp语义和socket特性，读到EOF不代表不能写
@@ -37,8 +39,6 @@ class Connection : public std::enable_shared_from_this<Connection> {
 
     void handleReadCallBack();
     void handleWriteCallBack();
-    void Echo();
-    void processEcho(const std::string& data, std::string& res);
     void readFromSck();
 
     // 尝试将 writebuffer 写入 sck
@@ -49,6 +49,10 @@ class Connection : public std::enable_shared_from_this<Connection> {
     // 连接完全断开
     // 从 subreactor 移除
     void handleDead();
+
+    void onHttp();
+    void sendHttpOnLoop(const std::string& resp, bool keepAlive);
+    void checkEmptyReadAfterEof();
 
    public:
     Connection(EventLoop* eloop, std::unique_ptr<Socket> sck);
