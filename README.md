@@ -10,6 +10,7 @@
 - 非阻塞 I/O、`epoll`、Reactor 风格的事件循环
 - 线程池处理业务，I/O 与计算分离
 - 自研 `Buffer`、`Connection`、Reactor 组件
+- **HTTP/1.1 最小实现**：合法 GET、Keep-Alive、短连接、`400` 拒绝非法请求
 - 设计文档与缺陷跟踪：`docs/DESIGN_v*.md`、`issue_log/`
 
 
@@ -24,16 +25,16 @@
 
 ## 当前架构
 
-当前版本采用 **主从多 Reactor + 线程池** 架构：
+当前版本采用 **主从多 Reactor + 线程池 + HTTP/1.1 最小业务**：
 
 - **MainReactor** 运行在主线程，持有 `Acceptor`，只负责监听端口和 accept 新连接。
 - **SubReactor** 数组与 CPU 核心数对齐，每个 SubReactor 固定一个 I/O 线程和一个 `EventLoop`，负责已建立连接的读写、`Channel` 更新和连接移除。
 - **Server** 通过 round-robin 将新连接投递到某个 SubReactor 的 `EventLoop` 任务队列，由 owner loop 创建 `std::shared_ptr<Connection>`。
-- **ThreadPool** 负责业务逻辑，worker 只处理从 owner loop 取出的 `std::string` 数据快照，不直接操作 socket、`Channel` 或内部 buffer。
-- 业务处理完成后，响应写回 `writeBuffer` 的动作回投到连接所属的 owner loop，由 I/O 线程继续执行非阻塞写或注册 `EPOLLOUT`。
-- **Connection** 由 `SubReactor` 以 `std::shared_ptr` 持有；继承 `std::enable_shared_from_this`；内部成员（`Socket`、`Channel`、`Buffer`）为 `std::unique_ptr`。
-- **半关闭收束**：`read == 0` 进入 `peerClose`，仍留在连接表直至写排空且 `working == 0` 后进入 `dead` 并移除；避免写路径与过早 `erase` 竞态。
-- **运行方式**：`main` 启动后常驻终端处理连接，当前未实现程序内优雅退出（停服为后续演进，见 issue_log）。
+- **ThreadPool** 负责 HTTP 响应组包（`HttpProcess::buildResponse` / `build400`），worker 不直接操作 socket、`Channel` 或 `readBuffer` / `writeBuffer`。
+- **HttpProcess** 在 owner I/O 线程上对 `readBuffer` 增量解析；合法 GET 以 `HttpRequest` 快照投递 worker；响应经 `enqueueTask` 回投 owner 写入 `writeBuffer` 并 `trySendToSck`。
+- **Connection** 由 `SubReactor` 以 `std::shared_ptr` 持有；`onHttp` 替代原 Echo；`handleDead` 内 `disableAll` 并将 `remove` 推迟到本轮 `poll` 之后的任务队列（FIX-026）。
+- **半关闭收束**：`read == 0` 进入 `peerClose`，写排空且 `working == 0` 后 `handleDead`；避免回调栈内同步 `erase`。
+
 
 ### 简要架构图
 
@@ -55,20 +56,18 @@ SubReactor EventLoop
   v
 Connection / Channel
   |
-  | read socket -> readBuffer (EOF -> peerClose)
-  | dataOut -> std::string 快照
+  | read -> readBuffer -> HttpProcess::parse (I/O)
+  | kComplete -> HttpRequest 快照
   v
-ThreadPool worker (working++)
+ThreadPool (working++)
   |
-  | 业务处理生成 response
+  | buildResponse / build400
   v
-owner EventLoop task queue (working--, dataIn)
+owner enqueueTask (working--, sendHttpOnLoop)
   |
-  | response -> writeBuffer
+  | writeBuffer -> trySendToSck / EPOLLOUT
   v
-trySendToSck / EPOLLOUT
-  |
-  | peerClose && working==0 && 写排空 -> dead -> remove
+handleDead -> enqueueTask(remove)
 ```
 
 ### 核心模块职责
@@ -80,8 +79,9 @@ trySendToSck / EPOLLOUT
 - `MainReactor`：主 Reactor，持有主线程 `EventLoop` 和 `Acceptor`，只负责监听与 accept，不管理普通连接。
 - `SubReactor`：子 Reactor，持有固定 I/O 线程、`unique_ptr<EventLoop>` 和 `Socket* -> shared_ptr<Connection>` 连接表；仅在 `Connection` 进入 `dead` 后从表移除。
 - `Acceptor`：监听端口，接收新连接，并通过回调交给 `Server`。
-- `Connection`：管理单连接读写 buffer、事件回调与 `ConnState`；`working` 标记异步业务是否在途；worker 只处理数据快照，socket I/O 仍在 owner loop 执行。
-- `Buffer`：应用层缓冲区，支持 `readv` 读取、动态扩容、部分写处理和 buffer 间数据转移。
+- `Connection`：管理单连接读写 buffer、`ConnState` 与 `onHttp`；`working` 标记异步业务是否在途；`handleDead` 延迟从连接表移除。
+- `HttpProcess`：HTTP 请求行/头解析与响应组包；解析仅在 I/O 线程，组包可在 worker。
+- `Buffer`：应用层缓冲区，支持 `readv`、按行解析（`findCRLF`）、动态扩容与部分写处理。
 - `ThreadPool`：业务线程池，负责异步处理从连接中拆出的业务任务。
 - `Server`：入口调度器，`unique_ptr` 持有 `MainReactor`、多个 `SubReactor` 与 `ThreadPool`，负责新连接 round-robin 分发。
 
@@ -96,6 +96,7 @@ mini_web_server/
 │   ├── Buffer.h
 │   ├── Channel.h
 │   ├── Connection.h
+│   ├── HttpProcess.h
 │   ├── Epoll.h
 │   ├── EventLoop.h
 │   ├── MainReactor.h
@@ -112,6 +113,7 @@ mini_web_server/
 │   │   ├── Buffer.cpp
 │   │   ├── Channel.cpp
 │   │   ├── Connection.cpp
+│   │   ├── HttpProcess.cpp
 │   │   ├── Epoll.cpp
 │   │   ├── EventLoop.cpp
 │   │   ├── MainReactor.cpp
@@ -130,7 +132,8 @@ mini_web_server/
 │   ├── DESIGN_v4.md
 │   ├── DESIGN_v4pro.md
 │   ├── DESIGN_v5.md               
-│   └── DESIGN_v6.md               # 当前
+│   ├── DESIGN_v6.md
+│   └── DESIGN_v7.md               # 当前
 ├── issue_log/
 │   ├── fixed_issues.md            # 已修复 / 已确认问题归档
 │   └── open_issues.md             # 未修复 / 暂缓设计问题跟踪
@@ -152,6 +155,7 @@ mini_web_server/
 - `Connection` 改用 `shared_ptr` + `enable_shared_from_this`，worker 只处理数据快照，响应写回回投 owner loop，修复异步 use-after-free 和 buffer 数据竞争。
 - 明确 EOF 语义：`read == 0` 只表示对端关闭写方向，EOF 前已读数据仍会继续处理并尝试发送响应。
 - 核心模块 **智能指针所有权重构**（`Server` / Reactor / `Connection` 成员）；`ConnState` + `working` 落地半关闭收束（FIX-023/024）；`EventLoop` 析构顺序修正（FIX-025）；修复 `Connection` 构造形参遮蔽成员（FIX-021）。
+- **HTTP 阶段**：`HttpProcess` 解析/组包、Echo 改为 `onHttp`；`handleDead` 延迟 `remove`（FIX-026）；内置 HTTP 验收客户端。
 
 ## 当前保留问题
 
@@ -164,7 +168,7 @@ mini_web_server/
 
 - 实现 **可停服** 与 **graceful shutdown**（主 loop 唤醒、公开 stop API、输出 drain、超时关闭）。
 - 将 SubReactor 管理抽象为专门的 `EventLoopThreadPool`，进一步解耦 `Server` 与 I/O 线程调度。
-- 在稳定架构基础上扩展 HTTP 协议解析、路由和静态资源服务。
+- 加固 **OPEN-003** / **OPEN-004**（读错误循环、`epoll_wait` EINTR）。
 
 ## 演进记录
 
@@ -178,14 +182,11 @@ mini_web_server/
 - stage8 : 围绕单 Reactor 多线程架构进行稳定性修复；修复线程池状态初始化、非阻塞部分写、epoll 事件删除、accept 可恢复错误、连接断开路径等问题；梳理当前架构边界和主从多 Reactor 演进方向，详见 [架构设计 v4pro](/docs/DESIGN_v4pro.md)
 - stage9 : 从单 Reactor 演进到 **主从多 Reactor**；引入 `MainReactor` / `SubReactor`，主线程只 accept，子 I/O 线程 round-robin 管理连接；`Connection` 改用 `shared_ptr` 管理生命周期，worker 只处理数据快照；明确 TCP 半关闭语义，详见 [架构设计 v5](/docs/DESIGN_v5.md)
 - stage10 : 服务器核心 **智能指针所有权重构**；`ConnState`（`connected` / `peerClose` / `dead`）与 `working` 计数实现半关闭下延迟 `remove`；运行模型为启动后常驻终端，详见 [架构设计 v6](/docs/DESIGN_v6.md)
+- stage11 : **HTTP/1.1 最小实现**（合法 GET、Keep-Alive、短连接、非法→400）；`HttpProcess` + 验收 client；`handleDead` 对齐 `enqueueTask` 延迟 remove（FIX-026），详见 [架构设计 v7](/docs/DESIGN_v7.md)
 
 ## Quick Start
 
-```shell
-cmake --build build
-```
-
-运行方式参见 [scripts/SCRIPTS.md](./scripts/SCRIPTS.md)。
+详见 [scripts/SCRIPTS.md](./scripts/SCRIPTS.md)。
 
 ## 致谢
 

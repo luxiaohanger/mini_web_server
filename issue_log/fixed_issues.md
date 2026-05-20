@@ -249,3 +249,15 @@
 - 现象：析构体先 `close(eloopFd)` 再析构成员，`~Channel` 对已关闭 fd 做 `epoll_ctl DEL`。
 - 修复：显式 `eloopChannel.reset(); ep.reset(); ::close(eloopFd);`——先拆 channel（`removeChannel`），再拆 epoll，最后关 eventfd。
 
+## FIX-026 `handleDead` 延迟 `remove`（对齐 muduo `runInLoop`）
+
+- 修复日期：2026-05-20
+- 状态：Fixed（关闭 **OPEN-005**，2026-05-20 复核的「回调栈内 erase / 延后析构」条目；与 **FIX-025** 的「原 OPEN-005」为不同问题，FIX-025 指 `EventLoop` 析构顺序）
+- 位置：`src/server/Connection.cpp` `handleDead()`（约 181–189 行）
+- 现象：在 `Channel::handle()` → `readCallBack` / `writeCallBack` 栈内同步 `Connections.erase`，map 唯一 `shared_ptr` 释放后，`onHttp` 末尾 `self` 或写回调路径可能在 `Channel::handle` 未返回时触发 `~Connection` / `~Channel`，存在对象生存期 UB（test3 短连接收束、test4 同步 400 等路径）。
+- 修复：
+  - `handleDead()`：`shared_from_this()` 续命；`state = dead`；`channel->disableAll()`；
+  - `removeConnectionCallBack` 放入 `eloop->enqueueTask`，在本轮 `poll` 全部 `channel->handle()` 结束后再 `erase`（与 `EventLoop::loop` 先 poll 后 tasks 一致）。
+- 验证：HTTP client 全套用例（含 `Connection: close`、POST→400）；逻辑上 `Channel::handle` 返回前不再 `erase` map。
+- 可选后续（未做）：`handleDead` 幂等 / `onHttp` 入口 `state==dead` 早退，防重复入队。
+

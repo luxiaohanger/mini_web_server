@@ -45,8 +45,7 @@ class Connection : public std::enable_shared_from_this<Connection> {
     // 失败则添加 EPOLLOUT
     void trySendToSck();
 
-    // 写回sck时检测到写出错
-    // 连接完全断开
+        // 连接完全断开
     // 从 subreactor 移除
     void handleDead();
 

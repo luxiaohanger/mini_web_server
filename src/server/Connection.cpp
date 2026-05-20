@@ -55,7 +55,6 @@ void Connection::handleReadCallBack() { onHttp(); }
 void Connection::checkEmptyReadAfterEof() {
     if (state == ConnState::peerClose && working == 0 &&
         writeBuffer->readable() == 0) {
-        state = ConnState::dead;
         handleDead();
     }
 }
@@ -84,8 +83,10 @@ void Connection::onHttp() {
         if (r == ParseResult::kNeedMore) break;
 
         if (r == ParseResult::kLineTooLong) {
-            state = ConnState::dead;
-            handleDead();
+            // 拒绝此连接
+            channel->disableReading();
+            state = ConnState::peerClose;
+            checkEmptyReadAfterEof();
             return;
         }
 
@@ -123,7 +124,6 @@ void Connection::trySendToSck() {
                 channel->disableWriting();
                 // 写排空，检查连接状态
                 if (state == ConnState::peerClose && working == 0) {
-                    state = ConnState::dead;
                     handleDead();
                 }
                 return;
@@ -139,7 +139,6 @@ void Connection::trySendToSck() {
                 continue;
             } else {
                 // 真正的错误（如 EPIPE 客户端断开），进行异常处理
-                state = ConnState::dead;
                 handleDead();
                 break;
             }
@@ -162,7 +161,6 @@ void Connection::handleWriteCallBack() {
                 channel->disableWriting();
                 // 写排空，检查连接状态
                 if (state == ConnState::peerClose && working == 0) {
-                    state = ConnState::dead;
                     handleDead();
                 }
                 break;
@@ -175,7 +173,6 @@ void Connection::handleWriteCallBack() {
             if (errno == EINTR) continue;  // 信号中断，继续写
 
             // 其他致命错误
-            state = ConnState::dead;
             handleDead();
             break;
         }
@@ -183,8 +180,13 @@ void Connection::handleWriteCallBack() {
 }
 
 void Connection::handleDead() {
+    auto self = shared_from_this();
+    state = ConnState::dead;
+    channel->disableAll();
     std::cout << "client " << sck->getFd() << " connection break\n";
-    removeConnectionCallBack(sck.get());
+    // 注入任务队列，防止本次channel没有响应完成就析构
+    eloop->enqueueTask(
+        [self]() { self->removeConnectionCallBack(self->sck.get()); });
     return;
 }
 

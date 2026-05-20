@@ -47,6 +47,5 @@ void Channel::handle() {
     // 每个事件都判断，可能同时存在
 
     if (this->revents & EPOLLIN) readCallBack();
-
     if (this->revents & EPOLLOUT) writeCallBack();
 }

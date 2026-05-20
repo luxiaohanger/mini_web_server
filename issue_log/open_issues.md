@@ -22,7 +22,7 @@
 - 位置：`src/server/Connection.cpp` `readFromSck()`（约 28–45 行）
 - 现象：`readv` 返回 `-1` 且 `errno` 不是 `EINTR` / `EAGAIN` / `EWOULDBLOCK` 时，**无 `break`**，`while (true)` 持续循环。
 - 机制：每次循环 `Buffer::sckToBuffer` 在栈上分配约 64KB（`Buffer.cpp`）。
-- 建议：增加 `else if (read_byte == -1) { state = ConnState::dead; handleDead(); break; }`（与写错误路径一致）。
+- 建议：增加 `else if (read_byte == -1) { handleDead(); break; }`（`handleDead` 内已设 `dead` 并延迟 remove，与写错误路径一致）。
 
 ## OPEN-004 `epoll_wait` 遇 `EINTR` 直接 `exit`
 
