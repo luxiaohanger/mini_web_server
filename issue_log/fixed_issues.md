@@ -259,5 +259,60 @@
   - `handleDead()`：`shared_from_this()` 续命；`state = dead`；`channel->disableAll()`；
   - `removeConnectionCallBack` 放入 `eloop->enqueueTask`，在本轮 `poll` 全部 `channel->handle()` 结束后再 `erase`（与 `EventLoop::loop` 先 poll 后 tasks 一致）。
 - 验证：HTTP client 全套用例（含 `Connection: close`、POST→400）；逻辑上 `Channel::handle` 返回前不再 `erase` map。
-- 可选后续（未做）：`handleDead` 幂等 / `onHttp` 入口 `state==dead` 早退，防重复入队。
+- 可选后续（未做）：`onHttp` 入口 `state==dead` 早退；worker 回投 task 内 `dead` 守卫见 **OPEN-005**。
+- 后续：**FIX-029** 已补 `handleDead` 幂等与 idle `deleteTimer`。
+
+## FIX-027 `refreshClock` 表空时 `timerfd_settime` 使用全零 `itimerspec`（v8）
+
+- 修复日期：2026-05-21
+- 状态：Fixed（关闭原 **OPEN-005** timerfd 条目）
+- 位置：`src/server/TimerQueue.cpp` `refreshClock()`（约 69–74 行）
+- 现象：`timers.empty()` 时 `timerfd_settime(..., nullptr, ...)`，`new_value` 为 NULL。
+- 修复：`struct itimerspec its{}`，表空时 `timerfd_settime(timeFd, TFD_TIMER_ABSTIME, &its, nullptr)` disarm。
+- 验证：删光所有连接 Timer 后无 `EINVAL`；后续 `addTimer` 仍能正常 arm。
+
+## FIX-028 `EventLoop::loop` 中 `hastime` 初始化为 `nullptr`（v8）
+
+- 修复日期：2026-05-21
+- 状态：Fixed（关闭 **OPEN-006**）
+- 位置：`src/server/EventLoop.cpp` `loop()`（约 34 行）
+- 现象：本轮 poll 无 timerfd 时 `hastime` 未赋值即判断，UB。
+- 修复：`Channel *hastime = nullptr;`，仅在有 timer Channel 就绪时 `handle`。
+- 验证：无 Timer 到期的多轮 `loop` 稳定运行。
+
+## FIX-029 `handleDead` 幂等并 `deleteTimer`（v8 idle）
+
+- 修复日期：2026-05-21
+- 状态：Fixed（关闭 **OPEN-007**）
+- 位置：`src/server/Connection.cpp` `handleDead()`（约 193–204 行）
+- 现象：连接关闭后 Timer 仍留在 `TimerQueue`，可能重复 `handleDead` / 重复 `enqueueTask(remove)`。
+- 修复：`if (state == ConnState::dead) return;`；`deleteTimerCallBack(timerId)`；再 `disableAll` 与延迟 remove。idle 回调仍调 `handleDead()`，由幂等保证安全。
+- 验证：idle 超时关连接后，该 `timerId` 不再触发；重复进入 `handleDead` 不重复删 map。
+
+## FIX-030 worker 回投 task：`working--` 后若 `dead` 则不再发送（v8）
+
+- 修复日期：2026-05-21
+- 状态：Fixed（关闭 **OPEN-005**）
+- 位置：`src/server/Connection.cpp` `onHttp()` 中 `enqueueTask` lambda（约 116–121 行）
+- 现象：idle 等路径已 `handleDead` 后，迟到的 worker task 仍可能 `sendHttpOnLoop`。
+- 修复：task 内先 `working--`（与 `working++` 配对），再 `if (state == dead) return;`，否则发送并 `checkEmptyReadAfterEof`。
+- 验证：worker 慢于 idle 超时场景下无对已死连接写响应；`peerClose` 且 `working` 计数可归零。
+
+## FIX-031 `readFromSck` 其它读错误走 `handleDead`（OPEN-003）
+
+- 修复日期：2026-05-21
+- 状态：Fixed
+- 位置：`src/server/Connection.cpp` `readFromSck()`（约 50–53 行）
+- 现象：非 `EINTR`/`EAGAIN`/`EWOULDBLOCK` 的 `read==-1` 或异常返回值时 `while(true)` 死循环，栈上反复 64KB 分配。
+- 修复：末分支 `else { handleDead(); break; }`。
+- 验证：对端异常复位等路径不再 CPU/栈飙高。
+
+## FIX-032 `epoll_wait` 遇 `EINTR` 重试（OPEN-004）
+
+- 修复日期：2026-05-21
+- 状态：Fixed
+- 位置：`src/server/Epoll.cpp` `Epoll::poll()`（约 37–50 行）
+- 现象：`EINTR` 时 `errif` 导致进程 `exit(1)`。
+- 修复：`while(true)` 包裹 `epoll_wait`；`nfds>0` 收集事件；`EINTR` 则 `continue`；其余错误 `errif`。
+- 验证：信号打断后 loop 继续，不退出进程。
 

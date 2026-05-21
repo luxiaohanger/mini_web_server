@@ -65,13 +65,14 @@ void TimerQueue::handleRead() {
 }
 
 void TimerQueue::refreshClock() {
+    struct itimerspec its{};
     if (timers.empty()) {
-        errif(timerfd_settime(timeFd, TFD_TIMER_ABSTIME, nullptr, nullptr) < 0,
+        errif(timerfd_settime(timeFd, TFD_TIMER_ABSTIME, &its, nullptr) < 0,
               "timeFd refresh error");
         return;
     }
     const auto& it = timers.begin()->second->getExpiration();
-    struct itimerspec its;
+
     struct timespec ts{};
     its.it_interval = ts;
     ts = it;

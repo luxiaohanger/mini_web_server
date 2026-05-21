@@ -31,7 +31,7 @@ void EventLoop::loop() {
 
         // 区分 socket channel 、eloopchannel
         // 和 timerchannel
-        Channel* hastime;
+        Channel* hastime = nullptr;
 
         for (auto channel : channels) {
             if (!timerQueue->isTimeChannel(channel))

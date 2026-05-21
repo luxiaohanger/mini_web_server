@@ -50,6 +50,9 @@ void Connection::readFromSck() {
             // EOF，客户端断开连接
             state = ConnState::peerClose;
             break;
+        } else {
+            handleDead();
+            break;
         }
     }
 }
@@ -118,6 +121,7 @@ void Connection::onHttp() {
             self->eloop->enqueueTask(
                 [self, resp = std::move(resp), keepAlive]() {
                     self->working--;
+                    if (self->state == ConnState::dead) return;
                     self->sendHttpOnLoop(resp, keepAlive);
                     self->checkEmptyReadAfterEof();
                 });
@@ -193,9 +197,11 @@ void Connection::handleWriteCallBack() {
 }
 
 void Connection::handleDead() {
+    if (state == ConnState::dead) return;
     auto self = shared_from_this();
     state = ConnState::dead;
     channel->disableAll();
+    deleteTimerCallBack(timerId);
     std::cout << "client " << sck->getFd() << " connection break\n";
     // 注入任务队列，防止本次channel没有响应完成就析构
     eloop->enqueueTask(

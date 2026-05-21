@@ -18,12 +18,21 @@
 namespace {
 
 constexpr int kRecvTimeoutSec = 3;
+// 服务端 idle 默认 60s，多 5s 余量
+constexpr int kIdleWaitSec = 65;
 
 struct TestCaseResult {
     std::string name;
     bool passed{true};
     std::string reason;
     std::string response;
+};
+
+struct ClientConfig {
+    const char* host{"127.0.0.1"};
+    uint16_t port{8888};
+    int repeat{1};
+    bool idleTest{false};
 };
 
 int connectServer(const char* host, uint16_t port) {
@@ -155,6 +164,12 @@ void closeFd(int fd) {
     if (fd >= 0) close(fd);
 }
 
+// 在同一 fd 上发 Keep-Alive GET 并读完整响应；失败表示连接已不可用
+bool keepAliveGetOnFd(int fd, const std::string& path, std::string& resp) {
+    if (!writeAll(fd, buildGetRequest(path, false))) return false;
+    return readHttpResponse(fd, resp);
+}
+
 TestCaseResult testSingleGet(const char* host, uint16_t port) {
     TestCaseResult r;
     r.name = "test1 单次 GET / → 200 + body 含 Hello, World!";
@@ -183,12 +198,8 @@ TestCaseResult testSingleGet(const char* host, uint16_t port) {
 TestCaseResult testKeepAliveOneGet(int fd, const std::string& path) {
     TestCaseResult r;
     r.name = "test2 同连接 GET " + path + " → 200 + body 含 Hello, World!";
-    if (!writeAll(fd, buildGetRequest(path, false))) {
-        failCase(r, "写入请求失败");
-        return r;
-    }
     std::string resp;
-    if (!readHttpResponse(fd, resp)) {
+    if (!keepAliveGetOnFd(fd, path, resp)) {
         failCase(r, "读取响应失败（超时或连接异常）");
         return r;
     }
@@ -272,6 +283,65 @@ TestCaseResult testPost400(const char* host, uint16_t port) {
     return r;
 }
 
+// -t：单连接发一轮 Keep-Alive GET，静置 kIdleWaitSec 后再请求；
+// 若同 fd 失败且重连后可继续，则 idle 超时生效。
+TestCaseResult testIdleTimeout(const char* host, uint16_t port) {
+    TestCaseResult r;
+    r.name = "idle-timeout：同连接 idle " + std::to_string(kIdleWaitSec) +
+             "s 后应需重连";
+
+    int fd = connectServer(host, port);
+    auto round1 = testKeepAliveOneGet(fd, "/");
+    if (!round1.passed) {
+        failCase(r, "第一轮失败: " + round1.reason, round1.response);
+        closeFd(fd);
+        return r;
+    }
+    for (const char* path : {"/a", "/b"}) {
+        auto t = testKeepAliveOneGet(fd, path);
+        if (!t.passed) {
+            failCase(r, "第一轮失败: " + t.reason, t.response);
+            closeFd(fd);
+            return r;
+        }
+    }
+    std::cout << "第一轮（同连接 GET /、/a、/b）通过，等待 " << kIdleWaitSec
+              << "s（服务端 idle 约 60s）...\n";
+    sleep(kIdleWaitSec);
+
+    std::string resp;
+    const bool stillAlive = keepAliveGetOnFd(fd, "/idle-check", resp);
+    closeFd(fd);
+
+    if (stillAlive) {
+        failCase(r, "静置后同连接仍可 GET 200，idle 未关闭连接（未触发重连）",
+                 resp);
+        return r;
+    }
+
+    std::cout << "同连接第二次 GET 失败，判定需重连；正在验证新连接可用...\n";
+    int fd2 = connectServer(host, port);
+    if (!keepAliveGetOnFd(fd2, "/", resp) ||
+        !expectStatus(resp, "HTTP/1.1 200")) {
+        failCase(r, "重连后 GET / 失败，服务端可能异常", resp);
+        closeFd(fd2);
+        return r;
+    }
+    closeFd(fd2);
+    std::cout << "重连后 GET / 成功，idle 超时验收通过。\n";
+    return r;
+}
+
+std::vector<TestCaseResult> runAll(const char* host, uint16_t port) {
+    std::vector<TestCaseResult> all;
+    all.push_back(testSingleGet(host, port));
+    auto ka = testKeepAliveTwoGets(host, port);
+    all.insert(all.end(), ka.begin(), ka.end());
+    all.push_back(testConnectionClose(host, port));
+    all.push_back(testPost400(host, port));
+    return all;
+}
+
 void printRoundSummary(int round, int totalRounds, const char* host,
                        uint16_t port,
                        const std::vector<TestCaseResult>& results) {
@@ -296,16 +366,6 @@ void printRoundSummary(int round, int totalRounds, const char* host,
     }
 }
 
-std::vector<TestCaseResult> runAll(const char* host, uint16_t port) {
-    std::vector<TestCaseResult> all;
-    all.push_back(testSingleGet(host, port));
-    auto ka = testKeepAliveTwoGets(host, port);
-    all.insert(all.end(), ka.begin(), ka.end());
-    all.push_back(testConnectionClose(host, port));
-    all.push_back(testPost400(host, port));
-    return all;
-}
-
 void printExpectations() {
     std::cout << "HTTP 验收客户端（仅失败时打印详情）\n";
     std::cout << "期望：\n";
@@ -315,44 +375,100 @@ void printExpectations() {
     std::cout << "  4. POST /             → 400 Bad Request\n\n";
 }
 
+void printIdleExpectations() {
+    std::cout << "idle 超时验收（-t）\n";
+    std::cout << "  单连接 Keep-Alive GET /、/a、/b → 等待 " << kIdleWaitSec
+              << "s → 同连接再 GET\n";
+    std::cout << "  期望：第二次失败，需重连；重连后 GET / 成功\n\n";
+}
+
+void printUsage(const char* prog) {
+    std::cerr << "usage:\n"
+              << "  " << prog
+              << " -n <repeat> [host] [port]   # 多轮 HTTP 四用例\n"
+              << "  " << prog
+              << " -t [host] [port]            # idle 超时（65s 后需重连）\n"
+              << "  " << prog
+              << " <repeat> [host] [port]      # 同 -n（兼容旧用法）\n";
+}
+
+bool parseConfig(int argc, char* argv[], ClientConfig& cfg) {
+    int i = 1;
+    bool gotMode = false;
+
+    while (i < argc) {
+        if (std::strcmp(argv[i], "-t") == 0) {
+            if (gotMode) return false;
+            cfg.idleTest = true;
+            cfg.repeat = 1;
+            gotMode = true;
+            ++i;
+            continue;
+        }
+        if (std::strcmp(argv[i], "-n") == 0) {
+            if (gotMode) return false;
+            if (i + 1 >= argc) return false;
+            cfg.repeat = std::atoi(argv[i + 1]);
+            if (cfg.repeat < 1) return false;
+            gotMode = true;
+            i += 2;
+            continue;
+        }
+        break;
+    }
+
+    if (!gotMode && i < argc && argv[i][0] >= '0' && argv[i][0] <= '9') {
+        cfg.repeat = std::atoi(argv[i++]);
+        if (cfg.repeat < 1) return false;
+    }
+
+    if (i < argc) {
+        cfg.host = argv[i++];
+    }
+    if (i < argc) {
+        cfg.port = static_cast<uint16_t>(std::atoi(argv[i++]));
+    }
+    if (i < argc) return false;
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
-    const char* host = "127.0.0.1";
-    uint16_t port = 8888;
-    int repeat = 1;
+    ClientConfig cfg;
+    if (!parseConfig(argc, argv, cfg)) {
+        printUsage(argv[0]);
+        return 1;
+    }
 
-    if (argc >= 2) {
-        repeat = std::atoi(argv[1]);
-        if (repeat < 1) {
-            std::cerr << "repeat count must be >= 1\n";
-            return 1;
+    if (cfg.idleTest) {
+        printIdleExpectations();
+        std::cout << "目标 " << cfg.host << ":" << cfg.port << "\n\n";
+        auto r = testIdleTimeout(cfg.host, cfg.port);
+        if (r.passed) {
+            std::cout << "\n[PASS] " << r.name << "\n";
+            return 0;
         }
-    }
-    if (argc >= 4) {
-        host = argv[2];
-        port = static_cast<uint16_t>(std::atoi(argv[3]));
-    }
-    if (argc > 4) {
-        std::cerr << "usage: client [repeat] [host] [port]\n";
+        printFailure(r);
         return 1;
     }
 
     printExpectations();
-    std::cout << "共 " << repeat << " 轮 → " << host << ":" << port << "\n\n";
+    std::cout << "共 " << cfg.repeat << " 轮 → " << cfg.host << ":" << cfg.port
+              << "\n\n";
 
     int totalFailed = 0;
-    for (int i = 1; i <= repeat; ++i) {
-        auto results = runAll(host, port);
+    for (int round = 1; round <= cfg.repeat; ++round) {
+        auto results = runAll(cfg.host, cfg.port);
         for (const auto& t : results) {
             if (!t.passed) ++totalFailed;
         }
-        printRoundSummary(i, repeat, host, port, results);
-        if (i < repeat) std::cout << '\n';
+        printRoundSummary(round, cfg.repeat, cfg.host, cfg.port, results);
+        if (round < cfg.repeat) std::cout << '\n';
     }
 
     if (totalFailed == 0) {
-        std::cout << "\n全部 " << repeat << " 轮通过。\n";
+        std::cout << "\n全部 " << cfg.repeat << " 轮通过。\n";
         return 0;
     }
     std::cerr << "\n合计失败用例数: " << totalFailed << "\n";

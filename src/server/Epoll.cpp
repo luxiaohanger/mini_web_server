@@ -34,12 +34,19 @@ void Epoll::updateChannel(Channel* channel) {
 
 std::vector<Channel*> Epoll::poll() {
     std::vector<Channel*> ans;
-    int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
-    errif(nfds == -1, "epoll wait error");
-    for (int i = 0; i < nfds; ++i) {
-        Channel* channel = static_cast<Channel*>(events[i].data.ptr);
-        channel->setRevents(events[i].events);
-        ans.push_back(channel);
+    while (true) {
+        int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
+        if (nfds > 0) {
+            for (int i = 0; i < nfds; ++i) {
+                Channel* channel = static_cast<Channel*>(events[i].data.ptr);
+                channel->setRevents(events[i].events);
+                ans.push_back(channel);
+            }
+            break;
+        } else if (nfds == -1 && errno == EINTR)
+            continue;
+        else
+            errif(true, "epoll wait error");
     }
     return ans;
 }

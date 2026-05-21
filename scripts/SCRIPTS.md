@@ -26,10 +26,12 @@ server 默认监听 **8888**（见 `src/server/main.cpp`）。
 ## 方式一：tmux 一键启动（推荐）
 
 ```bash
-bash scripts/up.sh              # 全套 HTTP 用例跑 1 轮
-bash scripts/up.sh 5            # 跑 5 轮
-bash scripts/up.sh --build 3    # 先编译，再跑 3 轮
-bash scripts/up.sh 2 127.0.0.1 8888
+bash scripts/up.sh                    # HTTP 四用例 1 轮（-n 1）
+bash scripts/up.sh -n 5              # HTTP 四用例 5 轮
+bash scripts/up.sh -t                 # idle 超时验收（约 65s，需等待）
+bash scripts/up.sh --build -n 3       # 先编译，再跑 3 轮 HTTP
+bash scripts/up.sh -t 127.0.0.1 8888
+bash scripts/up.sh 5                  # 兼容旧用法，等同 -n 5
 ```
 
 脚本行为：
@@ -57,28 +59,41 @@ bash scripts/up.sh 2 127.0.0.1 8888
 # 终端 1 — server
 ./build/src/server/server
 
-# 终端 2 — client（repeat = 全套用例重复次数）
-./build/src/client/client
-./build/src/client/client 5
-./build/src/client/client 10 127.0.0.1 8888
+# 终端 2 — HTTP 多轮四用例
+./build/src/client/client -n 1
+./build/src/client/client -n 5 127.0.0.1 8888
+./build/src/client/client 3          # 兼容旧用法，等同 -n 3
+
+# 终端 2 — idle 超时（单连接 → 等 65s → 应需重连）
+./build/src/client/client -t
+./build/src/client/client -t 127.0.0.1 8888
 ```
 
 ### client 参数
 
-| 参数 | 含义 | 默认 |
+| 模式 | 用法 | 含义 |
 |------|------|------|
-| `repeat` | 每轮依次跑完 4 个用例的次数 | `1` |
-| `host` | 服务器地址 | `127.0.0.1` |
-| `port` | 端口 | `8888` |
+| **HTTP 多轮** | `client -n <repeat> [host] [port]` | 每轮跑完 4 个用例，重复 `repeat` 次 |
+| **idle 验收** | `client -t [host] [port]` | 同连接 Keep-Alive GET /、/a、/b → 等待 65s → 同连接再 GET 应失败 → 重连验证 |
+| **兼容** | `client <repeat> [host] [port]` | 等同 `-n <repeat>` |
 
-每轮用例顺序：
+默认值：`host=127.0.0.1`，`port=8888`。
+
+#### HTTP 四用例（`-n` 每轮顺序）
 
 1. 单次 `GET /` → 期望 200 + `Hello, World`
 2. 同连接两次 GET（Keep-Alive）
 3. `Connection: close`
 4. `POST /` → 期望 400
 
-client 源码：`src/client/main.cpp`（HTTP 测试客户端，支持 `repeat` 参数）。
+#### idle 验收（`-t`）
+
+1. 单连接依次 GET `/`、`/a`、`/b`（Keep-Alive）
+2. 等待 **65s**（服务端 idle 约 **60s**）
+3. 同一 socket 再发 GET：应失败（连接已被 idle 关闭）
+4. 新建连接 GET `/`：应成功
+
+client 源码：`src/client/main.cpp`。
 
 ---
 
@@ -93,15 +108,20 @@ curl -v -H "Connection: close" http://127.0.0.1:8888/
 curl -v -X POST http://127.0.0.1:8888/
 ```
 
+idle 粗测：Keep-Alive 发一次请求后 `sleep 65`，再在同一 `nc` 连接上发请求，应断开。
+
 ---
 
 ## `up.sh` 选项摘要
 
 ```text
-bash scripts/up.sh [选项] [repeat] [host] [port]
+bash scripts/up.sh [选项] [-n repeat | -t] [host] [port]
 
+  -n <repeat>    HTTP 四用例重复轮数（默认 1）
+  -t             idle 超时验收（约 65s，勿与 -n 同用）
   -b, --build    启动前 cmake --build build
   -h, --help     帮助
+  <repeat>       无 -n/-t 时，正整数表示 -n repeat（兼容旧用法）
 ```
 
 环境变量（可选）：
@@ -119,6 +139,10 @@ bash scripts/up.sh [选项] [repeat] [host] [port]
 
 - 确认 server 已启动且监听 8888
 - 用 `ss -tlnp | grep 8888` 或 `curl` 检查
+
+**`-t` 很慢**
+
+- 正常：需等待约 65s 验证 idle
 
 **未安装 tmux**
 
@@ -140,5 +164,5 @@ bash scripts/up.sh [选项] [repeat] [host] [port]
 ```bash
 cmake --build build
 # 或
-bash scripts/up.sh --build 1
+bash scripts/up.sh --build -n 1
 ```
