@@ -5,6 +5,7 @@
 #include <mutex>
 #include <queue>
 
+class TimerQueue;
 class Epoll;
 class Channel;
 class EventLoop {
@@ -14,6 +15,7 @@ class EventLoop {
     int eloopFd;
     // 包装eloop_fd
     std::unique_ptr<Channel> eloopChannel;
+    std::unique_ptr<TimerQueue> timerQueue;
     std::mutex queue_mtx;
 
     // 等待被调用的善后函数
@@ -26,6 +28,7 @@ class EventLoop {
     // ET触发的原理不是缓冲区数据有变化
     // 而是缓冲区数据有无的状态切换
     void readCallback();
+    bool isEloopChannel(Channel* c);
 
    public:
     EventLoop();
@@ -34,5 +37,7 @@ class EventLoop {
     void updateChannel(Channel* channel);
     void enqueueTask(std::function<void()> func);
     void removeChannel(Channel* channel);
-    void stopLoop() { stop = true; }
+    void stopLoop();
+    int addTimer(std::function<void()> cb);
+    void deleteTimer(int id);
 };

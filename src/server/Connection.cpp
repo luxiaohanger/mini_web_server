@@ -17,7 +17,8 @@ Connection::Connection(EventLoop* eloop, std::unique_ptr<Socket> sock)
     : eloop(eloop),
       sck(std::move(sock)),
       state(ConnState::connected),
-      working(0) {
+      working(0),
+      timerId(-1) {
     errif(this->sck.get() == nullptr, "conn get nullptr ");
     channel = std::make_unique<Channel>(eloop, sck->getFd());
     channel->setReadCallBack([this]() { this->handleReadCallBack(); });
@@ -27,7 +28,10 @@ Connection::Connection(EventLoop* eloop, std::unique_ptr<Socket> sock)
     httpProcess_ = std::make_unique<HttpProcess>();
 }
 
-void Connection::startConnect() { channel->enableReading(); }
+void Connection::startConnect() {
+    channel->enableReading();
+    timerId = addTimerCallBack();
+}
 
 Connection::~Connection() {}
 
@@ -50,7 +54,15 @@ void Connection::readFromSck() {
     }
 }
 
-void Connection::handleReadCallBack() { onHttp(); }
+void Connection::refreshTimer() {
+    deleteTimerCallBack(timerId);
+    timerId = addTimerCallBack();
+}
+
+void Connection::handleReadCallBack() {
+    refreshTimer();
+    onHttp();
+}
 
 void Connection::checkEmptyReadAfterEof() {
     if (state == ConnState::peerClose && working == 0 &&
@@ -147,6 +159,7 @@ void Connection::trySendToSck() {
 }
 
 void Connection::handleWriteCallBack() {
+    refreshTimer();
     // EPOLLOUT 触发事件
     if (writeBuffer->readable() == 0) {
         channel->disableWriting();

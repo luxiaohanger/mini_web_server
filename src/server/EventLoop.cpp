@@ -5,6 +5,7 @@
 
 #include "Channel.h"
 #include "Epoll.h"
+#include "TimerQueue.h"
 #include "error_solve.h"
 
 EventLoop::EventLoop() : stop(false) {
@@ -14,10 +15,12 @@ EventLoop::EventLoop() : stop(false) {
     eloopChannel = std::make_unique<Channel>(this, eloopFd);
     eloopChannel->setReadCallBack([this]() { this->readCallback(); });
     eloopChannel->enableReading();
+    timerQueue = std::make_unique<TimerQueue>(this);
 }
 
 EventLoop::~EventLoop() {
     eloopChannel.reset();
+    timerQueue.reset();
     ep.reset();
     ::close(eloopFd);
 }
@@ -25,9 +28,20 @@ EventLoop::~EventLoop() {
 void EventLoop::loop() {
     while (!stop) {
         auto channels = ep->poll();
+
+        // 区分 socket channel 、eloopchannel
+        // 和 timerchannel
+        Channel* hastime;
+
         for (auto channel : channels) {
-            channel->handle();
+            if (!timerQueue->isTimeChannel(channel))
+                channel->handle();
+            else
+                hastime = channel;
         }
+
+        // 先处理一般handle，在处理 timer
+        if (hastime) hastime->handle();
 
         // 为了避免在持有锁时调用善后函数，先用栈空间存储
         std::vector<std::function<void()>> funcs;
@@ -74,3 +88,16 @@ void EventLoop::enqueueTask(std::function<void()> func) {
 }
 
 void EventLoop::removeChannel(Channel* channel) { ep->removeChannel(channel); }
+
+void EventLoop::stopLoop() {
+    timerQueue->stop();
+    stop = true;
+}
+
+int EventLoop::addTimer(std::function<void()> cb) {
+    return timerQueue->addTimer(std::move(cb));
+}
+
+void EventLoop::deleteTimer(int id) { timerQueue->deleteTimer(id); }
+
+bool EventLoop::isEloopChannel(Channel* c) { return eloopChannel.get() == c; }

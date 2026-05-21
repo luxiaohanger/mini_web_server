@@ -37,6 +37,12 @@ class Connection : public std::enable_shared_from_this<Connection> {
     std::function<void(Socket*)> removeConnectionCallBack;
     std::function<void(std::function<void()>)> process;
 
+    int timerId;
+    std::function<int()> addTimerCallBack;
+    std::function<void(int)> deleteTimerCallBack;
+    // peer 产生交互，刷新 timer
+    void refreshTimer();
+
     void handleReadCallBack();
     void handleWriteCallBack();
     void readFromSck();
@@ -44,10 +50,6 @@ class Connection : public std::enable_shared_from_this<Connection> {
     // 尝试将 writebuffer 写入 sck
     // 失败则添加 EPOLLOUT
     void trySendToSck();
-
-        // 连接完全断开
-    // 从 subreactor 移除
-    void handleDead();
 
     void onHttp();
     void sendHttpOnLoop(const std::string& resp, bool keepAlive);
@@ -65,7 +67,19 @@ class Connection : public std::enable_shared_from_this<Connection> {
         this->process = std::move(process);
     }
 
+    void setAddTimerCallBack(std::function<int()> cb) {
+        addTimerCallBack = std::move(cb);
+    }
+
+    void setDeleteTimerCallBack(std::function<void(int)> cb) {
+        deleteTimerCallBack = std::move(cb);
+    }
+
     void startConnect();
     // 通知断开连接
     void stop();
+
+    // 连接完全断开
+    // 从 subreactor 移除
+    void handleDead();
 };

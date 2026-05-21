@@ -17,6 +17,11 @@ void SubReactor::addConnection(
         conn->setProcess(taskSubmit);
         conn->setRemoveConnectionCallBack(
             [this](Socket* sck) { this->removeConnection(sck); });
+        conn->setAddTimerCallBack([this, conn]() {
+            return eloop->addTimer([conn]() { conn->handleDead(); });
+        });
+        conn->setDeleteTimerCallBack(
+            [this](int id) { eloop->deleteTimer(id); });
         Connections[sck] = conn;
         conn->startConnect();
     });
