@@ -11,7 +11,8 @@
 - 线程池处理业务，I/O 与计算分离
 - 自研 `Buffer`、`Connection`、Reactor 组件
 - 支持 HTTP/1.1 子集 ：合法 GET、Keep-Alive、短连接、`400` 拒绝非法请求
-- 超时连接处理 ：`timerfd` + `TimerQueue`；
+- 超时连接处理：`timerfd` + `TimerQueue`；Channel 激活续期 idle，到期 `handleDead`
+- 程序内停服：SIGINT / SIGTERM → `main` 控制线程 → Main/Sub Reactor 与 ThreadPool 有序 join
 - 设计文档与缺陷跟踪：`docs/DESIGN_v*.md`、`issue_log/`
 
 
@@ -19,21 +20,22 @@
 
 - **C++17**：面向对象封装、RAII 资源管理、移动语义、`std::function` 回调、lambda 表达式、模板编程、右值引用、完美转发、`std::future` / `std::packaged_task` 异步任务封装、`std::unique_ptr` / `std::shared_ptr` / `std::enable_shared_from_this` 管理组件与连接生命周期、`enum class` 状态机。
 - **Linux Network Programming**：TCP socket 编程、非阻塞 I/O（`fcntl` / `O_NONBLOCK`）、`epoll` I/O 多路复用、ET 触发、`eventfd` 跨线程唤醒、`timerfd` + `CLOCK_MONOTONIC` 定时、`readv` 分散读、`EINTR` / `EAGAIN` 错误处理。
-- **Reactor Pattern**：基于 `EventLoop`、`Channel`、`Epoll` 的事件分发；主 Reactor accept，多 Sub Reactor 管连接 I/O；`TimerQueue` 与业务 I/O 分 pass 调度。
+- **Reactor Pattern**：基于 `EventLoop`、`Channel`、`Epoll` 的事件分发；MainReactor accept，多 Sub Reactor 管连接 I/O；`TimerQueue` 与业务 I/O 分 pass 调度；`eventfd` 唤醒 loop 以支持跨线程 `stop`。
 - **Concurrency**：线程池、互斥锁、条件变量、任务队列、I/O 与 worker 职责分离、`enqueueTask` 回投 owner loop、round-robin 连接分发、`working` 协调异步与半关闭。
 - **Buffer & Protocol**：应用层读写缓冲区、动态扩容、部分写与 EPOLLOUT 兜底；HTTP/1.1 最小子集（GET、Keep-Alive、短连接）；连接 idle 超时治理。
 - **Build & Tooling**：CMake 构建、Shell / tmux 脚本、HTTP 验收 client（`-n` / `-t`）。
 
 ## 当前架构
 
-当前版本采用 **主从多 Reactor + 线程池 + HTTP/1.1 最小业务**：
+当前版本采用 **主从多 Reactor + 线程池 + HTTP/1.1 最小业务 + 程序内停服**：
 
-- **MainReactor** 运行在主线程，持有 `Acceptor`，只负责监听端口和 accept 新连接。
+- **main 线程** 为控制线程：注册 SIGINT/SIGTERM，等待停服标志后调用 `Server::stop()`；**不** 跑 `epoll_wait`。
+- **MainReactor** 运行在独立 I/O 线程，持有 `Acceptor`，只负责监听与 accept；`listenPort` / `stop` 经 `enqueueTask` 与 loop 通信。
 - **SubReactor** 数组与 CPU 核心数对齐，每个 SubReactor 固定一个 I/O 线程和一个 `EventLoop`，负责已建立连接的读写、`Channel` 更新和连接移除。
-- **Server** 通过 round-robin 将新连接投递到某个 SubReactor 的 `EventLoop` 任务队列，由 owner loop 创建 `std::shared_ptr<Connection>`。
+- **Server** 通过 round-robin 将新连接投递到某个 SubReactor 的 `EventLoop` 任务队列，由 owner loop 创建 `std::shared_ptr<Connection>`；`stop()` 顺序为 MainReactor → SubReactor(s) → ThreadPool。
 - **ThreadPool** 负责 HTTP 响应组包（`HttpProcess::buildResponse` / `build400`），worker 不直接操作 socket、`Channel` 或 `readBuffer` / `writeBuffer`。
 - **HttpProcess** 在 owner I/O 线程上对 `readBuffer` 增量解析；合法 GET 以 `HttpRequest` 快照投递 worker；响应经 `enqueueTask` 回投 owner 写入 `writeBuffer` 并 `trySendToSck`。
-- **Connection** 由 `SubReactor` 以 `std::shared_ptr` 持有；`onHttp` 替代原 Echo；`handleDead` 内 `disableAll` 并将 `remove` 推迟到本轮 `poll` 之后的任务队列（FIX-026）。
+- **Connection** 由 `SubReactor` 以 `std::shared_ptr` 持有；运行时 `handleDead` 使用 `Channel::remove` 并将 map remove 推迟到 task 队列（FIX-026）；停服时 `Connection::stop()` 置 `dead` 并摘 channel、cancel idle
 - **半关闭收束**：`read == 0` 进入 `peerClose`，写排空且 `working == 0` 后 `handleDead`；避免回调栈内同步 `erase`。
 - **TimerQueue**：每个 SubReactor 的 `EventLoop` 持一个 `timerfd`；连接在读/写 `handle` 入口续期 idle Timer，到期 `handleDead`。
 
@@ -70,23 +72,27 @@ owner enqueueTask (working--, sendHttpOnLoop)
   | writeBuffer -> trySendToSck / EPOLLOUT
   v
 handleDead -> enqueueTask(remove)
+
+停服 ：
+  SIGINT/SIGTERM -> main -> Server::stop()
+    -> MainReactor stop (join) -> SubReactor stop: Connection::stop() (join) -> ThreadPool stop
 ```
 
 ### 核心模块职责
 
 - `Socket`：封装 socket fd，负责 bind、listen、accept、read、write 和 fd 生命周期管理。
-- `Channel`：描述 fd 关注的事件和触发的事件，保存读写回调，不持有 fd。
+- `Channel`：描述 fd 关注的事件和触发的事件，保存读写回调，不持有 fd；`remove()` 从 epoll 显式摘除（停服与 `handleDead` 共用）。
 - `Epoll`：封装 `epoll_create1`、`epoll_ctl`、`epoll_wait`，负责事件监听和返回活跃 `Channel`。
 - `EventLoop`：事件循环核心；pass1 业务 I/O → pass2 timer → drain tasks；`eventfd` 跨线程唤醒；`addTimer` / `deleteTimer` 转发至 `TimerQueue`。
 - `Timer` / `TimerQueue`：单调钟绝对过期时间、按 id 扫表、`timerfd_settime` 重设最早闹钟；表空时 disarm。
-- `MainReactor`：主 Reactor，持有主线程 `EventLoop` 和 `Acceptor`，只负责监听与 accept，不管理普通连接。
-- `SubReactor`：子 Reactor，持有固定 I/O 线程、`unique_ptr<EventLoop>` 和 `Socket* -> shared_ptr<Connection>` 连接表；仅在 `Connection` 进入 `dead` 后从表移除。
+- `MainReactor`：主 Reactor，独立 I/O 线程运行 `EventLoop`，持有 `Acceptor`；只负责监听与 accept，不管理普通连接。
+- `SubReactor`：子 Reactor，持有固定 I/O 线程、`unique_ptr<EventLoop>` 和 `Socket* -> shared_ptr<Connection>` 连接表；运行时 `handleDead` 延迟 remove；停服时对连接调 `Connection::stop()`。
 - `Acceptor`：监听端口，接收新连接，并通过回调交给 `Server`。
-- `Connection`：管理单连接读写 buffer、`ConnState` 与 `onHttp`；`working` 标记异步业务是否在途；`handleDead` 延迟从连接表移除。
+- `Connection`：管理单连接读写 buffer、`ConnState` 与 `onHttp`；`working` 标记异步业务是否在途；`handleDead`（运行时）与 `stop()`（停服）分工见 DESIGN_v9。
 - `HttpProcess`：HTTP 请求行/头解析与响应组包；解析仅在 I/O 线程，组包可在 worker。
 - `Buffer`：应用层缓冲区，支持 `readv`、按行解析（`findCRLF`）、动态扩容与部分写处理。
 - `ThreadPool`：业务线程池，负责异步处理从连接中拆出的业务任务。
-- `Server`：入口调度器，`unique_ptr` 持有 `MainReactor`、多个 `SubReactor` 与 `ThreadPool`，负责新连接 round-robin 分发。
+- `Server`：入口调度器，`unique_ptr` 持有 `MainReactor`、多个 `SubReactor` 与 `ThreadPool`；`start()` 启动各 I/O 线程后返回；`stop()` 编排停服（`main` 必须显式调用）。
 
 ## 文件结构
 
@@ -141,7 +147,8 @@ mini_web_server/
 │   ├── DESIGN_v5.md               
 │   ├── DESIGN_v6.md
 │   ├── DESIGN_v7.md
-│   └── DESIGN_v8.md               # 当前：TimerQueue + idle
+│   ├── DESIGN_v8.md               
+│   └── DESIGN_v9.md               # 当前：程序内停服与退出闭环
 ├── issue_log/
 │   ├── fixed_issues.md            # 已修复 / 已确认问题归档
 │   └── open_issues.md             # 未修复 / 暂缓设计问题跟踪
@@ -165,17 +172,18 @@ mini_web_server/
 - 核心模块 **智能指针所有权重构**（`Server` / Reactor / `Connection` 成员）；`ConnState` + `working` 落地半关闭收束（FIX-023/024）；`EventLoop` 析构顺序修正（FIX-025）；修复 `Connection` 构造形参遮蔽成员（FIX-021）。
 - **HTTP 阶段**：`HttpProcess` 解析/组包、Echo 改为 `onHttp`；`handleDead` 延迟 `remove`（FIX-026）；内置 HTTP 验收客户端。
 - **v8 idle**：`TimerQueue` + 连接 idle；`epoll_wait` EINTR 重试、读错误收束、worker 回投 `dead` 守卫（FIX-027～032）；client 支持 `-t` idle 验收。
+- **v9 停服**：`main` 控制线程 + 信号触发 `Server::stop()`；MainReactor 独立 I/O 线程与 `enqueueTask` 唤醒；`Connection::stop` / `handleDead` 分工（FIX-033）。
 
 ## 当前保留问题
 
-详见 [问题清单](./issue_log/open_issues.md)。
-
-- **暂缓**：程序内停服与 graceful shutdown（进程常驻、Ctrl+C 结束为当前用法）；`stop_half_force()` 为预留骨架。
+详见 [问题清单](./issue_log/open_issues.md)。当前无 OPEN 缺陷条目。
 
 ## 未来方向
 
-- 实现 **可停服** 与 **graceful shutdown**（主 loop 唤醒、公开 stop API、输出 drain、超时关闭；可复用 `TimerQueue`）。
-
+- **Connection 职责拆分**（TcpConnection / HttpContext / State）
+- **Buffer 三段式重构**、**AsyncLogger**
+- **wrk / perf** 性能基线与热点优化
+- 可选演进：停服时 write drain / 超时强关
 
 ## 演进记录
 
@@ -191,10 +199,12 @@ mini_web_server/
 - stage10 : 服务器核心 **智能指针所有权重构**；`ConnState`（`connected` / `peerClose` / `dead`）与 `working` 计数实现半关闭下延迟 `remove`；运行模型为启动后常驻终端，详见 [架构设计 v6](/docs/DESIGN_v6.md)
 - stage11 : **HTTP/1.1 最小实现**（合法 GET、Keep-Alive、短连接、非法→400）；`HttpProcess` + 验收 client；`handleDead` 对齐 `enqueueTask` 延迟 remove（FIX-026），详见 [架构设计 v7](/docs/DESIGN_v7.md)
 - stage12 : **TimerQueue + idle timeout**（`timerfd`、Channel 激活续期、约 60s 无 I/O 则 `handleDead`）；client `-t` / `-n`，详见 [架构设计 v8](/docs/DESIGN_v8.md)
+- stage13 : **程序内停服**（SIGINT/SIGTERM、`main` 控制线程、`Server::stop()`、Main/Sub `enqueueTask` 唤醒 loop）；`Connection::stop` 与 `handleDead` 分工，详见 [架构设计 v9](/docs/DESIGN_v9.md)
 
 ## Quick Start
 
 详见 [scripts/SCRIPTS.md](./scripts/SCRIPTS.md)。
+
 
 ## 致谢
 

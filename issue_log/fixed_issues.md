@@ -209,11 +209,11 @@
 ## FIX-022 析构路径半强制 `stop_half_force`
 
 - 修复日期：2026-05-19（`229739a`）
-- 状态：Fixed（部分语义，完整 graceful 仍见 OPEN-001）
+- 状态：Fixed（骨架；完整停服见 FIX-033）
 - 位置：`Server`、`MainReactor`、`SubReactor`、`ThreadPool`
 - 现象：`~Server()` 为空；`ThreadPool` 析构不 `join` worker；进程退出时资源与线程未收束。
 - 修复：`Server::~Server()` 调用 `stop_half_force()`：依次 `mainReactor->stop()`、各 `SubReactor::stop()`（含 `join` I/O 线程）、`threadpool->stop()`（`join` worker）。`ThreadPool` 析构体改为空，依赖先 `stop()`。
-- 备注：属 force/half-force **骨架**，供将来停服/析构用；当前 `main` 在 `start()` 常驻，用户通常杀进程退出，不走完整停服路径（见 OPEN-001/002 暂缓）。
+- 备注：属 force/half-force **骨架**；完整程序内停服见 **FIX-033**（`main` 显式 `stop()`，非析构路径）。
 
 ## FIX-023 `ConnState`：EOF 仅 `peerClose`，写错误才 `remove`
 
@@ -262,7 +262,7 @@
 - 可选后续（未做）：`onHttp` 入口 `state==dead` 早退；worker 回投 task 内 `dead` 守卫见 **OPEN-005**。
 - 后续：**FIX-029** 已补 `handleDead` 幂等与 idle `deleteTimer`。
 
-## FIX-027 `refreshClock` 表空时 `timerfd_settime` 使用全零 `itimerspec`（v8）
+## FIX-027 `refreshClock` 表空时 `timerfd_settime` 使用全零 `itimerspec`
 
 - 修复日期：2026-05-21
 - 状态：Fixed（关闭原 **OPEN-005** timerfd 条目）
@@ -271,7 +271,7 @@
 - 修复：`struct itimerspec its{}`，表空时 `timerfd_settime(timeFd, TFD_TIMER_ABSTIME, &its, nullptr)` disarm。
 - 验证：删光所有连接 Timer 后无 `EINVAL`；后续 `addTimer` 仍能正常 arm。
 
-## FIX-028 `EventLoop::loop` 中 `hastime` 初始化为 `nullptr`（v8）
+## FIX-028 `EventLoop::loop` 中 `hastime` 初始化为 `nullptr`
 
 - 修复日期：2026-05-21
 - 状态：Fixed（关闭 **OPEN-006**）
@@ -280,7 +280,7 @@
 - 修复：`Channel *hastime = nullptr;`，仅在有 timer Channel 就绪时 `handle`。
 - 验证：无 Timer 到期的多轮 `loop` 稳定运行。
 
-## FIX-029 `handleDead` 幂等并 `deleteTimer`（v8 idle）
+## FIX-029 `handleDead` 幂等并 `deleteTimer`
 
 - 修复日期：2026-05-21
 - 状态：Fixed（关闭 **OPEN-007**）
@@ -289,7 +289,7 @@
 - 修复：`if (state == ConnState::dead) return;`；`deleteTimerCallBack(timerId)`；再 `disableAll` 与延迟 remove。idle 回调仍调 `handleDead()`，由幂等保证安全。
 - 验证：idle 超时关连接后，该 `timerId` 不再触发；重复进入 `handleDead` 不重复删 map。
 
-## FIX-030 worker 回投 task：`working--` 后若 `dead` 则不再发送（v8）
+## FIX-030 worker 回投 task：`working--` 后若 `dead` 则不再发送
 
 - 修复日期：2026-05-21
 - 状态：Fixed（关闭 **OPEN-005**）
@@ -298,7 +298,7 @@
 - 修复：task 内先 `working--`（与 `working++` 配对），再 `if (state == dead) return;`，否则发送并 `checkEmptyReadAfterEof`。
 - 验证：worker 慢于 idle 超时场景下无对已死连接写响应；`peerClose` 且 `working` 计数可归零。
 
-## FIX-031 `readFromSck` 其它读错误走 `handleDead`（OPEN-003）
+## FIX-031 `readFromSck` 其它读错误走 `handleDead`
 
 - 修复日期：2026-05-21
 - 状态：Fixed
@@ -307,7 +307,7 @@
 - 修复：末分支 `else { handleDead(); break; }`。
 - 验证：对端异常复位等路径不再 CPU/栈飙高。
 
-## FIX-032 `epoll_wait` 遇 `EINTR` 重试（OPEN-004）
+## FIX-032 `epoll_wait` 遇 `EINTR` 重试
 
 - 修复日期：2026-05-21
 - 状态：Fixed
@@ -315,4 +315,20 @@
 - 现象：`EINTR` 时 `errif` 导致进程 `exit(1)`。
 - 修复：`while(true)` 包裹 `epoll_wait`；`nfds>0` 收集事件；`EINTR` 则 `continue`；其余错误 `errif`。
 - 验证：信号打断后 loop 继续，不退出进程。
+
+## FIX-033 程序内停服与退出闭环
+
+- 修复日期：2026-05-22
+- 状态：Fixed
+- 位置：`src/server/main.cpp`、`MainReactor`、`SubReactor`、`Server`、`Connection`；设计见 `docs/DESIGN_v9.md`
+- 现象（修复前）：
+  - **OPEN-001**：`main` 阻塞在 `MainReactor::loop()`，无程序内退出，依赖 Ctrl+C 杀进程。
+  - **OPEN-002**：`MainReactor::stop()` 跨线程直接 `stopLoop()` 不唤醒 `epoll_wait`，停服路径可能 hang。
+- 修复：
+  - `main` 为控制线程：SIGINT/SIGTERM → `g_stop_requested` → `Server::stop()`。
+  - `MainReactor` 与 `SubReactor` 并列：`eloopThread` + `start()` 非阻塞 + `stop()` 经 `enqueueTask` 唤醒 loop 后 `join`。
+  - `Server::stop()` 顺序：MainReactor → SubReactor(s) → ThreadPool。
+  - 连接停服：`SubReactor::stop()` 仅调 `Connection::stop()`（`dead` + `remove` + cancel idle timer）；运行时收束仍走 `handleDead()`（延迟 `enqueueTask` remove）。
+  - 调用约定：`main` 必须显式 `stop()`；`~Server()` 不兜底（DESIGN_v9 Q11）。
+- 验证：`kill -SIGTERM` 或 Ctrl+C 后进程正常退出，打印停服日志，各 I/O/worker 线程 join。
 

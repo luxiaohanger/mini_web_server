@@ -75,7 +75,8 @@ class Connection : public std::enable_shared_from_this<Connection> {
     }
 
     void startConnect();
-    // 通知断开连接
+    // 断开连接,修改状态
+    // 用于线程关闭，独立于 handleDead
     void stop();
 
     // 不再单独使用 remove 回调，而是统一使用dead处理

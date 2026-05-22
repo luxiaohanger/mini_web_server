@@ -4,7 +4,7 @@
 
 ---
 
-## 前置条件
+## 前置条件（构建）
 
 ```bash
 # 项目根目录，首次构建
@@ -23,7 +23,9 @@ server 默认监听 **8888**（见 `src/server/main.cpp`）。
 
 ---
 
-## 方式一：tmux 一键启动（推荐）
+## 启动
+
+### 方式一：tmux 一键启动（推荐）
 
 ```bash
 bash scripts/up.sh                    # HTTP 四用例 1 轮（-n 1）
@@ -44,20 +46,19 @@ bash scripts/up.sh 5                  # 兼容旧用法，等同 -n 5
 
 | 按键 | 作用 |
 |------|------|
-| `Ctrl+b` 然后 `d` | 分离会话（后台继续跑） |
+| `Ctrl+b` 然后 `d` | 分离会话（server/client 后台继续跑） |
 | `Ctrl+b` 然后 `x` | 关闭当前窗格 |
 | `tmux attach -t mini_web_server` | 重新附着 |
-| `tmux kill-session -t mini_web_server` | 结束整个会话 |
-
-进程结束后窗格会提示「按回车关闭」。
+| `tmux kill-session -t mini_web_server` | 结束整个会话（见下方「停止」） |
 
 ---
 
-## 方式二：两个终端分别启动
+### 方式二：两个终端分别启动
 
 ```bash
 # 终端 1 — server
 ./build/src/server/server
+# 期望输出：Server is starting!
 
 # 终端 2 — HTTP 多轮四用例
 ./build/src/client/client -n 1
@@ -68,6 +69,23 @@ bash scripts/up.sh 5                  # 兼容旧用法，等同 -n 5
 ./build/src/client/client -t
 ./build/src/client/client -t 127.0.0.1 8888
 ```
+
+---
+
+### 方式三：curl 手工验证
+
+不依赖 client，可用 curl 对照：
+
+```bash
+curl -v http://127.0.0.1:8888/
+curl -v --http1.1 http://127.0.0.1:8888/a http://127.0.0.1:8888/b
+curl -v -H "Connection: close" http://127.0.0.1:8888/
+curl -v -X POST http://127.0.0.1:8888/
+```
+
+idle 粗测：Keep-Alive 发一次请求后 `sleep 65`，再在同一 `nc` 连接上发请求，应断开。
+
+---
 
 ### client 参数
 
@@ -97,18 +115,58 @@ client 源码：`src/client/main.cpp`。
 
 ---
 
-## 方式三：curl 手工验证
+## 停止
 
-不依赖 client，可用 curl 对照：
+server 启动后会阻塞在控制线程，等待停服信号；收到信号后走 `Server::stop()`（停 accept → 关连接 → join 线程池），**不应** 依赖 `kill -9` 日常退出。
+
+### 前台 server（单终端 / tmux 左窗格）
+
+| 操作 | 说明 |
+|------|------|
+| **Ctrl+C** | 发送 SIGINT，触发程序内停服 |
+| 期望输出 | `Server stop safely!` 后进程退出、shell 提示符返回 |
+
+### 后台或另开终端
 
 ```bash
-curl -v http://127.0.0.1:8888/
-curl -v --http1.1 http://127.0.0.1:8888/a http://127.0.0.1:8888/b
-curl -v -H "Connection: close" http://127.0.0.1:8888/
-curl -v -X POST http://127.0.0.1:8888/
+# 推荐：SIGTERM（与 Ctrl+C 同属 v9 停服路径）
+kill -SIGTERM $(pgrep -x server)
+
+# 确认已退出
+wait $(pgrep -x server) 2>/dev/null || echo "server 已停止"
+
+# 或检查端口
+ss -tlnp | grep 8888    # 无输出表示已释放
 ```
 
-idle 粗测：Keep-Alive 发一次请求后 `sleep 65`，再在同一 `nc` 连接上发请求，应断开。
+### tmux 会话（`up.sh` 启动）
+
+| 场景 | 操作 |
+|------|------|
+| 只停 server | 切到 **左窗格**（server），**Ctrl+C** |
+| 只停 client | 切到右窗格，client 跑完会自行结束；或 **Ctrl+C** |
+| 结束整个会话 | `tmux kill-session -t mini_web_server`（会向各窗格发 SIGHUP，server 若仍存活需先 Ctrl+C 或 `kill -SIGTERM`） |
+
+client 结束后右窗格会提示「按回车关闭」；server 窗格在停服前会一直保持运行。
+
+### 停服验收（可选）
+
+```bash
+./build/src/server/server &
+SERVER_PID=$!
+sleep 1
+curl -s http://127.0.0.1:8888/ >/dev/null
+kill -SIGTERM "$SERVER_PID"
+wait "$SERVER_PID"
+echo "exit code: $?"
+# 期望：exit code 0，无 hang
+```
+
+### 注意
+
+- **`kill -9` / `SIGKILL`**：无法被捕获，跳过 `Server::stop()`，仅紧急强杀时使用。
+- **调用约定**：`main` 必须显式调用 `Server::stop()`；当前 `main.cpp` 已保证，无需额外脚本。
+- 修改监听端口需同时改 `src/server/main.cpp` 中 `listenPort` 与 client 的 `host`/`port` 参数。
 
 ---
 
@@ -149,17 +207,11 @@ bash scripts/up.sh [选项] [-n repeat | -t] [host] [port]
 - `up.sh` 会打印两条手动命令，不会自动起进程
 - 或使用「方式二」两个终端
 
-**修改端口**
+**server Ctrl+C 后 hang**
 
-- 需同时改 `src/server/main.cpp` 中 `listenPort` 与 client 的 `host`/`port` 参数
+- 应为 v9 之前的行为；当前版本 Main/Sub 经 `enqueueTask` 唤醒 loop，若仍 hang 见 `issue_log/open_issues.md`
 
-**停服**
-
-- 当前 server 无程序内 graceful shutdown；在 server 终端 `Ctrl+C` 或 kill 进程（见 `issue_log/open_issues.md`）
-
----
-
-## 仅重新编译
+**仅重新编译**
 
 ```bash
 cmake --build build

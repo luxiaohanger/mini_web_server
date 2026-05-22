@@ -33,16 +33,14 @@ void SubReactor::start() {
 }
 
 void SubReactor::stop() {
-    // 让 sub 给所有连接下达停止信号
-    // conn 先停止 channel，再注册自毁程序
-    // 保证conn进入 dead state
+    // conn 移除 channel，进入 dead state
     // 防止 working 回归后误 IO
     // 不保证善后函数全部完成
     // 注册循环退出信号
+    // conn 资源回收由智能指针自动完成
     eloop->enqueueTask([this]() {
         for (auto it : Connections) {
             it.second->stop();
-            it.second->handleDead();
         }
         eloop->stopLoop();
     });
