@@ -33,7 +33,6 @@ class Connection : public std::enable_shared_from_this<Connection> {
     // state == ConnState::peerClose && working == 0
     // 表示不会有新worker且worker全部结束
 
-    // 使用共享指针，无需 delete，而是移除在此处的指针
     std::function<void(Socket*)> removeConnectionCallBack;
     std::function<void(std::function<void()>)> process;
 
@@ -59,12 +58,12 @@ class Connection : public std::enable_shared_from_this<Connection> {
     Connection(EventLoop* eloop, std::unique_ptr<Socket> sck);
     ~Connection();
 
-    void setRemoveConnectionCallBack(std::function<void(Socket*)> cb) {
-        removeConnectionCallBack = std::move(cb);
-    }
-
     void setProcess(std::function<void(std::function<void()>)> process) {
         this->process = std::move(process);
+    }
+
+    void setRemoveConnectionCallBack(std::function<void(Socket*)> cb) {
+        removeConnectionCallBack = std::move(cb);
     }
 
     void setAddTimerCallBack(std::function<int()> cb) {
@@ -79,7 +78,9 @@ class Connection : public std::enable_shared_from_this<Connection> {
     // 通知断开连接
     void stop();
 
-    // 连接完全断开
-    // 从 subreactor 移除
+    // 不再单独使用 remove 回调，而是统一使用dead处理
+    // 内部注册延迟自毁任务
+    // 并对外 public
+    // 保证连接延迟关闭语义统一
     void handleDead();
 };

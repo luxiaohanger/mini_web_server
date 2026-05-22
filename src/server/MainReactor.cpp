@@ -9,21 +9,29 @@ MainReactor::MainReactor() { eloop = std::make_unique<EventLoop>(); }
 MainReactor::~MainReactor() {}
 
 void MainReactor::listenPort(int port) {
-    if (Acceptors.find(port) != Acceptors.end()) return;
-    auto acceptor = std::make_unique<Acceptor>(eloop.get(), port);
-    acceptor->setNewConnectionCallBack(
-        [this](Socket* sck) { newConnectionCallback(sck); });
-    Acceptors[port] = std::move(acceptor);
-    Acceptors[port]->startListen();
+    eloop->enqueueTask([this, port]() {
+        if (Acceptors.find(port) != Acceptors.end()) return;
+        auto acceptor = std::make_unique<Acceptor>(eloop.get(), port);
+        acceptor->setNewConnectionCallBack(
+            [this](Socket* sck) { newConnectionCallback(sck); });
+        Acceptors[port] = std::move(acceptor);
+        Acceptors[port]->startListen();
+    });
 }
 
-void MainReactor::start() { eloop->loop(); }
+void MainReactor::start() {
+    eloopThread = std::thread([this]() { eloop->loop(); });
+}
 
 void MainReactor::stop() {
-    eloop->stopLoop();
+    eloop->enqueueTask([this]() {
+        while (!Acceptors.empty()) {
+            auto it = Acceptors.begin();
+            Acceptors.erase(it->first);
+        }
+        eloop->stopLoop();
+    });
 
-    while (!Acceptors.empty()) {
-        auto it = Acceptors.begin();
-        Acceptors.erase(it->first);
-    }
+    // 等待循环退出，回收 sub 线程
+    if (eloopThread.joinable()) eloopThread.join();
 }

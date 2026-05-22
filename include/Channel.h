@@ -22,8 +22,6 @@ class Channel {
     std::function<void()> readCallBack;
     std::function<void()> writeCallBack;
 
-    void remove();
-
    public:
     Channel(EventLoop* eloop, int fd);
     ~Channel();
@@ -64,4 +62,10 @@ class Channel {
     void setWriteCallBack(std::function<void()> cb) {
         this->writeCallBack = std::move(cb);
     }
+
+    // 暴露自毁接口
+    // stop 链调用时摘除 channel
+    // 避免 conn 因为 shared_ptr 延长生命到 eloop 析构之后
+    // 此时 channel 析构，再调用摘除会出错
+    void remove();
 };

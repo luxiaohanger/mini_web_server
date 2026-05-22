@@ -210,6 +210,6 @@ void Connection::handleDead() {
 }
 
 void Connection::stop() {
-    // 先禁用 channel，拒绝外界连接
-    channel->disableAll();
+    // 摘除 channel
+    channel->remove();
 }

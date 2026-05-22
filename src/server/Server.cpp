@@ -19,9 +19,9 @@ Server::Server() : subIdx(0) {
     }
 }
 
-Server::~Server() { stop_half_force(); }
+Server::~Server() {}
 
-void Server::stop_half_force() {
+void Server::stop() {
     mainReactor->stop();
     for (int i = 0; i < SubReactors.size(); ++i) SubReactors[i]->stop();
     threadpool->stop();

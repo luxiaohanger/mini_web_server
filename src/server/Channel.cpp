@@ -41,7 +41,7 @@ void Channel::disableAll() {
 
 void Channel::remove() { eloop->removeChannel(this); }
 
-Channel::~Channel() { remove(); }
+Channel::~Channel() {}
 
 void Channel::handle() {
     // 每个事件都判断，可能同时存在

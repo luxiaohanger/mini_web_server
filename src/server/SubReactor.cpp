@@ -16,7 +16,7 @@ void SubReactor::addConnection(
                                                  std::unique_ptr<Socket>(sck));
         conn->setProcess(taskSubmit);
         conn->setRemoveConnectionCallBack(
-            [this](Socket* sck) { this->removeConnection(sck); });
+            [this](Socket* sc) { Connections.erase(sc); });
         conn->setAddTimerCallBack([this, conn]() {
             return eloop->addTimer([conn]() { conn->handleDead(); });
         });
@@ -27,8 +27,6 @@ void SubReactor::addConnection(
     });
 }
 
-void SubReactor::removeConnection(Socket* sck) { Connections.erase(sck); }
-
 void SubReactor::start() {
     // 所有在 loop 函数中处理的事件都运行在子线程上
     eloopThread = std::thread([this]() { eloop->loop(); });
@@ -36,14 +34,15 @@ void SubReactor::start() {
 
 void SubReactor::stop() {
     // 让 sub 给所有连接下达停止信号
-    // 回收conn
+    // conn 先停止 channel，再注册自毁程序
+    // 保证conn进入 dead state
+    // 防止 working 回归后误 IO
     // 不保证善后函数全部完成
     // 注册循环退出信号
     eloop->enqueueTask([this]() {
-        for (auto it : Connections) it.second->stop();
-        while (!Connections.empty()) {
-            auto it = Connections.begin();
-            Connections.erase(it->first);
+        for (auto it : Connections) {
+            it.second->stop();
+            it.second->handleDead();
         }
         eloop->stopLoop();
     });
