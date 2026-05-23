@@ -1,6 +1,8 @@
-# BENCH-NNN：简述（如 wrk 基线 / perf 热点 / 优化后复测）
+# {版本}：简述（wrk 基线 / perf 热点 / 优化后复测）
 
-> 复制本文件并重命名：`BENCH-NNN_YYYYMMDD_简述.md`
+> 复制本文件并重命名：`{版本}_{YYYYMMDD}_{简述}.md`  
+> 例：`v10.0_20260523_bench.md`、`v9_20260523_wrk_baseline.md`  
+> **一设计版本一份报告**：wrk 与 perf 写在同一文件（§4 + §5）；版本号与 `docs/DESIGN_v*.md` 一致即代码一致。
 
 ---
 
@@ -8,12 +10,11 @@
 
 | 项 | 值 |
 |----|-----|
-| 编号 | BENCH-NNN |
+| 设计版本 | `vN` 或 `v10.x`（对齐 `docs/DESIGN_v*.md` 与当时 server 代码） |
 | 日期 | YYYY-MM-DD |
 | 测试人 | luxiaohang |
-| 设计版本 | `vN` 或 `v10.x`（见 `benchmark_log/README.md`「设计版本」表，对应 `docs/DESIGN_v*.md`） |
-| 测试类型 | wrk 基线 / wrk 对比 / perf 采样 / 优化后复测 |
-| 关联说明 | （可选：同版本内 FIX 编号、v10.x 优化摘要；正文自包含要点） |
+| 测试类型 | wrk 基线 / wrk+perf / 优化后复测 |
+| 关联说明 | （可选：FIX 编号、对照哪一版；正文自包含要点） |
 
 ---
 
@@ -52,15 +53,15 @@
 # wrk 基线
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j2
 
-# perf / 火焰图（须带符号，VS Code CMake 选 RelWithDebInfo 等价）
-cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build -j2
+# perf / 火焰图（可与 wrk 分次跑，报告仍写同一文件）
+bash scripts/perf_bench.sh -v v10.0   # 脚本内 RelWithDebInfo 重编
 ```
 
 ---
 
 ## 4. wrk 测试
 
-> **2 核 2 GiB 环境**：`-c` 不超过 20；勿用 `-c50` / `-c100`（见 `README.md`）。perf 采样时的 wrk 与 BENCH-002 主基线对齐。
+> **2 核 2 GiB 环境**：`-c` 不超过 20；勿用 `-c50` / `-c100`（见 `README.md`）。
 
 ### 4.1 参数说明
 
@@ -68,30 +69,16 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build -j2
 |------|------|------|------|------|
 | Keep-Alive 热身 | 1 | 10 | 5s | 首次 / 换版本后 |
 | Keep-Alive 基线 | 1～2 | 10～20 | 10～30s | 默认 |
-| Keep-Alive + perf | 2 | 20 | 30s | 与 perf 同跑，RPS 不与纯 wrk 基线比 |
+| Keep-Alive + perf | 2 | 20 | 30s | 与 perf 同跑，RPS 不与 §4 纯 wrk 比 |
 | 短连接 | 1 | 5～10 | 5～10s | `-H "Connection: close"` |
 
 ### 4.2 执行命令
 
 ```bash
-# 示例：Keep-Alive 主基线（BENCH-002 对照）
 wrk -t2 -c20 -d30s http://127.0.0.1:8888/
-
-# 示例：短连接（轻量）
-wrk -t1 -c10 -d10s -H "Connection: close" http://127.0.0.1:8888/
 ```
 
 ### 4.3 原始输出
-
-<!-- 每次 wrk 完整粘贴一段，保留 Thread Stats / Latency Distribution / Errors -->
-
-**场景 A（Keep-Alive, -t2 -c20 -d30s）：**
-
-```text
-（粘贴 wrk 完整终端输出）
-```
-
-**场景 B（Connection: close, -t1 -c10 -d10s，可选）：**
 
 ```text
 （粘贴 wrk 完整终端输出）
@@ -102,23 +89,17 @@ wrk -t1 -c10 -d10s -H "Connection: close" http://127.0.0.1:8888/
 | 场景 | -t | -c | -d | RPS | Latency avg | Latency max | Errors | 备注 |
 |------|----|----|-----|-----|-------------|-------------|--------|------|
 | KA | 2 | 20 | 30s | | | | | |
-| close | 1 | 10 | 10s | | | | | 可选 |
-
-> 同一配置建议跑 2～3 次，表中可填稳定区间或取中位数。
 
 ---
 
 ## 5. perf / flamegraph
 
-> **逐步操作** 见 [`README.md`](./README.md)「perf 采样」。本节只填本次结果摘要。
+> 操作见 [`README.md`](./README.md)「perf 采样」。本节填本次结果；未做 perf 可写「本版本未做 perf」或省略。
 
-### 5.1 采样命令（实际使用的完整命令）
+### 5.1 采样命令
 
 ```bash
-# 窗格 A：server 已启动
-# 窗格 B：wrk -t2 -c20 -d30s http://127.0.0.1:8888/
-# 窗格 C：与 wrk 同时
-sudo perf record -F 997 -g -p $(pgrep -x server) -- sleep 30
+bash scripts/perf_bench.sh -v v10.0
 ```
 
 ### 5.2 采样条件
@@ -126,56 +107,50 @@ sudo perf record -F 997 -g -p $(pgrep -x server) -- sleep 30
 | 项 | 值 |
 |----|-----|
 | 构建类型 | RelWithDebInfo |
-| 并发 wrk 命令 | `wrk -t2 -c20 -d30s http://127.0.0.1:8888/` |
+| 并发 wrk | `wrk -t2 -c20 -d30s http://127.0.0.1:8888/` |
 | 采样时长 | 30s |
-| perf 参数 | `-F 997 -g -p $(pgrep -x server)` |
-| 产物路径 | `benchmark_log/artifacts/BENCH-NNN_flamegraph.svg` |
-| perf.data | `benchmark_log/artifacts/BENCH-NNN_perf.data`（可选保留） |
+| 产物路径 | `benchmark_log/artifacts/{版本}_flamegraph.svg` |
+| perf.data | `benchmark_log/artifacts/{版本}_perf.data` |
 
-### 5.3 热点摘要（自包含，勿依赖外部笔记）
+### 5.3 wrk（与 perf 同跑，可选）
 
-从 `sudo perf report --stdio -g --no-children` 与火焰图归纳，填 3～8 行：
+| 场景 | -t | -c | -d | RPS | Latency avg | Errors | 备注 |
+|------|----|----|-----|-----|-------------|--------|------|
+| KA + perf | 2 | 20 | 30s | | | | 不与 §4 纯 wrk 严格对比 |
+
+### 5.4 热点摘要
 
 | 占比（约） | 符号 / 函数 | 说明 |
 |------------|-------------|------|
-| | | 例：HttpProcess 解析路径 |
-| | | 例：Buffer 拷贝 |
 | | | |
 
-### 5.4 perf report 摘录（可选）
+### 5.5 perf report 摘录（可选）
 
 ```text
-（粘贴 perf report 前 30～50 行，或 Overhead 最高的符号列表）
+（粘贴 perf report 摘录）
 ```
 
 ---
 
 ## 6. 优化对比（可选）
 
-若本次为优化后复测，与基线条目对照：
-
-| 场景 | 优化前 RPS | 优化后 RPS | 变化 | 说明 |
-|------|------------|------------|------|------|
-| KA -t2 -c20 -d30s | | | | |
-
-**改动摘要：**
-
-- （如：Buffer 写路径、锁粒度、任务队列等，一两句话）
+| 场景 | 对照 RPS | 本次 RPS | 说明 |
+|------|----------|----------|------|
+| KA -t2 -c20 -d30s | | | |
 
 ---
 
 ## 7. 结论与下一步
 
-- **结论**：（如：CPU 已饱和 / accept 瓶颈 / ThreadPool 排队导致 p99 抬升）
-- **异常**：（Errors、连接被拒、与功能测试冲突等）
-- **下一步**：（如：perf 确认热点 → 针对 Buffer 优化 → BENCH-NNN+1 复测）
+- **结论**：
+- **异常**：
+- **下一步**：
 
 ---
 
 ## 8. 附录（可选）
 
 ```bash
-# 压测时观察负载
 top -H -p $(pgrep -x server)
 mpstat 1 5
 ss -s

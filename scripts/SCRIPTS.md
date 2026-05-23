@@ -1,7 +1,5 @@
 # 运行脚本说明
 
-项目提供 `scripts/up.sh`，用于在 Linux 上快速启动 **HTTP server** 与 **测试 client**。
-
 ---
 
 ## 前置条件（构建）
@@ -23,42 +21,50 @@ server 默认监听 **8888**（见 `src/server/main.cpp`）。
 
 ---
 
-## 启动
+## 多终端启动
 
-### 方式一：tmux 一键启动（推荐）
+### tmux 双窗格（推荐）
+
+左窗格跑 server，右窗格跑 client 或 wrk；SSH 断开可 `tmux attach` 恢复。
 
 ```bash
-bash scripts/up.sh                    # HTTP 四用例 1 轮（-n 1）
-bash scripts/up.sh -n 5              # HTTP 四用例 5 轮
-bash scripts/up.sh -t                 # idle 超时验收（约 65s，需等待）
-bash scripts/up.sh --build -n 3       # 先编译，再跑 3 轮 HTTP
-bash scripts/up.sh -t 127.0.0.1 8888
-bash scripts/up.sh 5                  # 兼容旧用法，等同 -n 5
+tmux new -s mini_web_server
 ```
 
-脚本行为：
+**窗格 A（默认）— server：**
 
-1. 左窗格：启动 `server`（常驻，处理 HTTP 请求）
-2. 右窗格：等待 0.5s 后启动 `client`（避免 connect 早于 listen）
-3. 附着到 tmux 会话 `mini_web_server`
+```bash
+./build/src/server/server
+# 期望输出：Server is starting!
+```
+
+**分屏** — `Ctrl+b` 然后 `%`（左右）或 `"`（上下）。
+
+**窗格 B — HTTP 功能验收（等 server 就绪后）：**
+
+```bash
+sleep 0.5
+./build/src/client/client -n 1
+./build/src/client/client -n 5 127.0.0.1 8888
+./build/src/client/client -t          # idle 超时验收，约 65s
+```
 
 **tmux 常用操作：**
 
-| 按键 | 作用 |
-|------|------|
-| `Ctrl+b` 然后 `d` | 分离会话（server/client 后台继续跑） |
+| 按键 / 命令 | 作用 |
+|-------------|------|
+| `Ctrl+b` 然后 `d` | 分离会话（后台继续跑） |
 | `Ctrl+b` 然后 `x` | 关闭当前窗格 |
 | `tmux attach -t mini_web_server` | 重新附着 |
-| `tmux kill-session -t mini_web_server` | 结束整个会话（见下方「停止」） |
+| `tmux kill-session -t mini_web_server` | 结束整个会话 |
 
----
+wrk 压测时同样用双窗格：A 常驻 server，B 跑 wrk（见 [`benchmark_log/README.md`](../benchmark_log/README.md)）。
 
-### 方式二：两个终端分别启动
+### 两个终端分别启动
 
 ```bash
 # 终端 1 — server
 ./build/src/server/server
-# 期望输出：Server is starting!
 
 # 终端 2 — HTTP 多轮四用例
 ./build/src/client/client -n 1
@@ -70,9 +76,7 @@ bash scripts/up.sh 5                  # 兼容旧用法，等同 -n 5
 ./build/src/client/client -t 127.0.0.1 8888
 ```
 
----
-
-### 方式三：curl 手工验证
+### curl 手工验证
 
 不依赖 client，可用 curl 对照：
 
@@ -87,7 +91,7 @@ idle 粗测：Keep-Alive 发一次请求后 `sleep 65`，再在同一 `nc` 连�
 
 ---
 
-### client 参数
+## client 参数
 
 | 模式 | 用法 | 含义 |
 |------|------|------|
@@ -139,15 +143,13 @@ wait $(pgrep -x server) 2>/dev/null || echo "server 已停止"
 ss -tlnp | grep 8888    # 无输出表示已释放
 ```
 
-### tmux 会话（`up.sh` 启动）
+### tmux 会话
 
 | 场景 | 操作 |
 |------|------|
-| 只停 server | 切到 **左窗格**（server），**Ctrl+C** |
-| 只停 client | 切到右窗格，client 跑完会自行结束；或 **Ctrl+C** |
-| 结束整个会话 | `tmux kill-session -t mini_web_server`（会向各窗格发 SIGHUP，server 若仍存活需先 Ctrl+C 或 `kill -SIGTERM`） |
-
-client 结束后右窗格会提示「按回车关闭」；server 窗格在停服前会一直保持运行。
+| 只停 server | 切到 server 窗格，**Ctrl+C** |
+| 只停 client | client 跑完会自行结束；或 **Ctrl+C** |
+| 结束整个会话 | 先在各窗格停 server，再 `tmux kill-session -t mini_web_server` |
 
 ### 停服验收（可选）
 
@@ -170,74 +172,43 @@ echo "exit code: $?"
 
 ---
 
-## `up.sh` 选项摘要
+## perf 自动测试（`perf_bench.sh`）
 
-```text
-bash scripts/up.sh [选项] [-n repeat | -t] [host] [port]
-
-  -n <repeat>    HTTP 四用例重复轮数（默认 1）
-  -t             idle 超时验收（约 65s，勿与 -n 同用）
-  -b, --build    启动前 cmake --build build
-  -h, --help     帮助
-  <repeat>       无 -n/-t 时，正整数表示 -n repeat（兼容旧用法）
-```
-
-环境变量（可选）：
-
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `BUILD_DIR` | `<项目根>/build` | 构建目录 |
-| `SESSION_NAME` | `mini_web_server` | tmux 会话名 |
-
----
-
-## perf 采样与火焰图（`perf_bench.sh`）
-
-**一条命令全自动**（无需改 VS Code CMake）：
-
-**须指定 `-n NNN`**（无默认值；重复编号报错不覆盖）：
+**须指定设计版本 `-v`**；产物按 `{版本}_*` 命名（一版本一份）：
 
 ```bash
-bash scripts/perf_bench.sh -n NNN
+bash scripts/perf_bench.sh -v v10.0
 ```
 
-流程：停 server → 删除 `build/` → **RelWithDebInfo** 重编 → 后台起 server → wrk + **dwarf** perf → 火焰图。
-
-### 前置
-
-- 已安装 `perf`、`wrk`、`cmake`（Linux 服务器）
-- FlameGraph 未安装时脚本自动 `git clone` 到 `~/FlameGraph`
+流程：停 server → 删 `build/` → RelWithDebInfo 重编 → 起 server → wrk + dwarf perf → 火焰图。
 
 ### 其他用法
 
 ```bash
-bash scripts/perf_bench.sh --skip-build -n NNN
+bash scripts/perf_bench.sh --skip-build -v v10.0
 bash scripts/perf_bench.sh check
-bash scripts/perf_bench.sh --stop-server -n NNN
-bash scripts/perf_bench.sh flamegraph -n NNN -i benchmark_log/artifacts/BENCH-NNN_perf.data
+bash scripts/perf_bench.sh --stop-server -v v10.0
+bash scripts/perf_bench.sh flamegraph -v v10.0
 ```
 
 ### 常用选项
 
-| 选项 | 默认 | 说明 |
-|------|------|------|
-| `-n NNN` | （必填） | BENCH 编号；对应产物或 md 条目已存在则拒绝执行 |
-| `-d 秒` | 30 | wrk 与 perf 采样时长 |
-| `-t` / `-c` | 2 / 20 | wrk 线程与连接数 |
-| `--fp` | — | 改用帧指针 `-g`（默认 dwarf） |
-| `--skip-build` | — | 跳过删 build 与重编 |
-| `--stop-server` | — | 采样结束后停 server |
+| 选项 | 说明 |
+|------|------|
+| `-v <版本>` | **必填**（run / flamegraph），如 `v10.0` |
+| `-d 秒` | 采样时长（默认 30） |
+| `--skip-build` | 跳过重编 |
 
 ### 产物（`benchmark_log/artifacts/`）
 
 | 文件 | 内容 |
 |------|------|
-| `BENCH-NNN_wrk.txt` | wrk 完整输出 |
-| `BENCH-NNN_perf.data` | perf 原始数据 |
-| `BENCH-NNN_perf_report.txt` | `perf report` 文本 |
-| `BENCH-NNN_flamegraph.svg` | 火焰图 |
+| `{版本}_wrk.txt` | wrk 输出 |
+| `{版本}_perf.data` | perf 数据 |
+| `{版本}_perf_report.txt` | 文本报告 |
+| `{版本}_flamegraph.svg` | 火焰图 |
 
-大文件默认被 `artifacts/.gitignore` 忽略；路径与热点摘要写入 BENCH 条目第 5 节。流程说明见 [`benchmark_log/README.md`](../benchmark_log/README.md)。
+记录文档：`benchmark_log/{版本}_{YYYYMMDD}_bench.md`（wrk + perf 同一份）。详见 [`benchmark_log/README.md`](../benchmark_log/README.md)。
 
 ---
 
@@ -254,8 +225,7 @@ bash scripts/perf_bench.sh flamegraph -n NNN -i benchmark_log/artifacts/BENCH-NN
 
 **未安装 tmux**
 
-- `up.sh` 会打印两条手动命令，不会自动起进程
-- 或使用「方式二」两个终端
+- 使用「两个终端分别启动」
 
 **server Ctrl+C 后 hang**
 
@@ -265,6 +235,4 @@ bash scripts/perf_bench.sh flamegraph -n NNN -i benchmark_log/artifacts/BENCH-NN
 
 ```bash
 cmake --build build
-# 或
-bash scripts/up.sh --build -n 1
 ```

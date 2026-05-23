@@ -10,7 +10,7 @@ FLAMEGRAPH_DIR="${FLAMEGRAPH_DIR:-$HOME/FlameGraph}"
 SERVER_LOG="${SERVER_LOG:-/tmp/server.log}"
 BUILD_JOBS="${BUILD_JOBS:-$(nproc 2>/dev/null || echo 2)}"
 
-BENCH_NNN=""
+DESIGN_VER=""
 DURATION=30
 WRK_THREADS=2
 WRK_CONNECTIONS=20
@@ -38,13 +38,13 @@ usage() {
   check        检查依赖与当前二进制符号（不重编）
 
 选项:
-  -n <NNN>     BENCH 编号（**必填**，run / flamegraph；无默认值）
+  -v <版本>    设计版本（**必填**，run / flamegraph），如 v10.0
   -d <秒>      wrk 与 perf 时长（默认 30）
   -t / -c      wrk 线程 / 连接数（默认 2 / 20）
   -u <url>     wrk URL（默认 http://127.0.0.1:8888/）
-  -i <file>    perf.data 路径（flamegraph 子命令）
+  -i <file>    perf.data 路径（flamegraph 子命令，默认 artifacts/{版本}_perf.data）
   -j <N>       cmake --build 并行数（默认 nproc）
-  --skip-build 跳过删 build 与重编（已编好时）
+  --skip-build 跳过删 build 与重编
   --fp         perf 用帧指针 -g（默认 dwarf）
   --no-warmup  跳过 wrk 5s 热身
   --stop-server  结束后 SIGTERM 停 server
@@ -52,14 +52,14 @@ usage() {
   -h, --help
 
 示例:
-  bash scripts/perf_bench.sh -n NNN
-  bash scripts/perf_bench.sh --skip-build -n NNN
+  bash scripts/perf_bench.sh -v v10.0
+  bash scripts/perf_bench.sh --skip-build -v v10.0
   bash scripts/perf_bench.sh check
-  bash scripts/perf_bench.sh flamegraph -n NNN -i benchmark_log/artifacts/BENCH-NNN_perf.data
+  bash scripts/perf_bench.sh flamegraph -v v10.0
 
 说明:
-  - 未指定 -n，或 BENCH-NNN 对应产物/条目已存在 → 报错退出，不覆盖
-  - NNN 可写 3 或 003，统一格式化为三位数
+  - 一设计版本一份产物：benchmark_log/artifacts/{版本}_wrk.txt 等
+  - 记录文档: benchmark_log/{版本}_{YYYYMMDD}_bench.md（按 TEMPLATE 填写 wrk + perf）
 
 环境变量: BUILD_DIR, BUILD_JOBS, FLAMEGRAPH_DIR, ARTIFACTS_DIR, SERVER_LOG
 EOF
@@ -73,48 +73,13 @@ need_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "未找到命令: $1"
 }
 
-format_bench_nnn() {
-    printf '%03d' "$((10#$1))"
+require_design_version() {
+    [[ -n "$DESIGN_VER" ]] || die "缺少必需参数 -v <版本>（如 -v v10.0）"
+    [[ "$DESIGN_VER" =~ ^v[0-9]+(\.[0-9]+)?$ ]] || die "版本格式应为 vN 或 v10.x: $DESIGN_VER"
 }
 
-require_bench_nnn() {
-    [[ -n "$BENCH_NNN" ]] || die "缺少必需参数 -n <NNN>（BENCH 编号，例如 -n 4）"
-    [[ "$BENCH_NNN" =~ ^[0-9]+$ ]] || die "-n 须为非负整数: $BENCH_NNN"
-    BENCH_NNN=$(format_bench_nnn "$BENCH_NNN")
-    log "BENCH 编号: $BENCH_NNN"
-}
-
-# run：四类 artifacts + benchmark_log 条目均不可已存在
-assert_run_outputs_absent() {
-    local f
-    local -a dup=()
-    shopt -s nullglob
-    for f in \
-        "$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_wrk.txt" \
-        "$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_perf.data" \
-        "$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_perf_report.txt" \
-        "$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_flamegraph.svg" \
-        "$ROOT/benchmark_log"/BENCH-${BENCH_NNN}_*.md; do
-        [[ -e "$f" ]] && dup+=("$f")
-    done
-    shopt -u nullglob
-    if [[ ${#dup[@]} -gt 0 ]]; then
-        die "BENCH-${BENCH_NNN} 已有产物或条目，拒绝覆盖: ${dup[*]}"
-    fi
-}
-
-# flamegraph：仅检查将写入的 SVG / report
-assert_flamegraph_outputs_absent() {
-    local f
-    local -a dup=()
-    for f in \
-        "$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_perf_report.txt" \
-        "$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_flamegraph.svg"; do
-        [[ -e "$f" ]] && dup+=("$f")
-    done
-    if [[ ${#dup[@]} -gt 0 ]]; then
-        die "BENCH-${BENCH_NNN} 报告/火焰图已存在，拒绝覆盖: ${dup[*]}"
-    fi
+artifact_base() {
+    echo "$DESIGN_VER"
 }
 
 ensure_flamegraph() {
@@ -146,7 +111,7 @@ verify_server_symbols() {
     elif file "$SERVER" | grep -q 'with debug_info'; then
         log "server 含 debug_info ✓"
     else
-        die "server 无调试符号，火焰图会出现 [unknown]；勿使用 --skip-build，或检查构建是否成功"
+        die "server 无调试符号；请勿 --skip-build，或检查 RelWithDebInfo 构建"
     fi
 }
 
@@ -228,7 +193,9 @@ run_wrk() {
 
 run_sample() {
     local pid="$1"
-    local perf_out="$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_perf.data"
+    local base perf_out
+    base="$(artifact_base)"
+    perf_out="$ARTIFACTS_DIR/${base}_perf.data"
     local perf_args=(record -F "$PERF_FREQ" -p "$pid" -o "$perf_out")
 
     if [[ "$CALL_GRAPH" == "dwarf" ]]; then
@@ -246,7 +213,9 @@ run_sample() {
 
 generate_flamegraph() {
     local data="$1"
-    local svg="$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_flamegraph.svg"
+    local base svg
+    base="$(artifact_base)"
+    svg="$ARTIFACTS_DIR/${base}_flamegraph.svg"
     [[ -f "$data" ]] || die "perf.data 不存在: $data"
     ensure_flamegraph
     log "生成火焰图 → $svg"
@@ -256,7 +225,9 @@ generate_flamegraph() {
 
 generate_report() {
     local data="$1"
-    local report="$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_perf_report.txt"
+    local base report
+    base="$(artifact_base)"
+    report="$ARTIFACTS_DIR/${base}_perf_report.txt"
     log "perf report → $report"
     perf_cmd report -i "$data" --stdio -g --no-children | tee "$report" | head -80
     log "完整报告: $report"
@@ -282,16 +253,17 @@ cmd_check() {
 }
 
 cmd_flamegraph() {
-    require_bench_nnn
-    assert_flamegraph_outputs_absent
+    require_design_version
     local data="${PERF_DATA:-}"
+    local base
+    base="$(artifact_base)"
     if [[ -z "$data" ]]; then
-        if [[ -f "$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_perf.data" ]]; then
-            data="$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_perf.data"
+        if [[ -f "$ARTIFACTS_DIR/${base}_perf.data" ]]; then
+            data="$ARTIFACTS_DIR/${base}_perf.data"
         elif [[ -f "$ROOT/perf.data" ]]; then
             data="$ROOT/perf.data"
         else
-            die "未找到 perf.data，请用 -i 指定"
+            die "未找到 perf.data: $ARTIFACTS_DIR/${base}_perf.data"
         fi
     fi
     log "使用 perf.data: $data"
@@ -301,10 +273,11 @@ cmd_flamegraph() {
 }
 
 cmd_run() {
-    local wrk_out pid
+    local wrk_out pid base
 
-    require_bench_nnn
-    assert_run_outputs_absent
+    require_design_version
+    base="$(artifact_base)"
+    log "设计版本: $DESIGN_VER"
 
     need_cmd cmake
     need_cmd perf
@@ -327,7 +300,7 @@ cmd_run() {
     [[ -n "$pid" ]] || die "server 启动失败"
     log "采样目标 server PID=$pid"
 
-    wrk_out="$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_wrk.txt"
+    wrk_out="$ARTIFACTS_DIR/${base}_wrk.txt"
 
     if [[ "$DO_WARMUP" -eq 1 && "$SKIP_WRK" -eq 0 ]]; then
         log "wrk 热身 5s ..."
@@ -350,10 +323,11 @@ cmd_run() {
     generate_report "$PERF_DATA"
 
     log "完成 → $ARTIFACTS_DIR"
-    log "  wrk:        BENCH-${BENCH_NNN}_wrk.txt"
-    log "  perf.data:  BENCH-${BENCH_NNN}_perf.data"
-    log "  report:     BENCH-${BENCH_NNN}_perf_report.txt"
-    log "  flamegraph: BENCH-${BENCH_NNN}_flamegraph.svg"
+    log "  wrk:        ${base}_wrk.txt"
+    log "  perf.data:  ${base}_perf.data"
+    log "  report:     ${base}_perf_report.txt"
+    log "  flamegraph: ${base}_flamegraph.svg"
+    log "请更新或新建 benchmark_log/${DESIGN_VER}_YYYYMMDD_bench.md（wrk + perf 同一份）"
 
     if [[ "$STOP_SERVER" -eq 1 ]]; then
         stop_server
@@ -366,8 +340,8 @@ while [[ $# -gt 0 ]]; do
             MODE="$1"
             shift
             ;;
-        -n)
-            BENCH_NNN="$2"
+        -v)
+            DESIGN_VER="$2"
             shift 2
             ;;
         -d)
@@ -413,6 +387,9 @@ while [[ $# -gt 0 ]]; do
         --skip-wrk)
             SKIP_WRK=1
             shift
+            ;;
+        -s | -n)
+            die "已移除 -s / -n 参数；请仅用 -v <版本>，产物为 {版本}_*"
             ;;
         --start-server)
             warn "--start-server 已废弃：run 默认自动停服、重编、起 server"

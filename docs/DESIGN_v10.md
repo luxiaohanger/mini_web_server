@@ -1,6 +1,8 @@
 # 压测与性能优化（v10 系列）
 
-v10.x **每个版本一张表**，仅三行：**背景 / 变更 / 结果**。**结果**只写描述性摘要并链到 `benchmark_log/BENCH-NNN`，**不写 wrk/perf 等测试指令**（命令与原始输出仅在 bench log）。压测 log 对齐 **v 版本**（如 `v10.0`），不写 stage。
+v10.x **每个版本一张表**，仅三行：**背景 / 变更 / 结果**。**结果**只写描述性摘要并链到 `benchmark_log/` 测试记录（`{版本}_{YYYYMMDD}_{简述}.md`），**不写 wrk/perf 等测试指令**。压测 log 对齐 **设计版本**（如 `v10.0`），不写 stage。
+
+**升版规则**：仅当 **`src/` 下 server 业务代码**有优化或行为变更时递增 v10.x。一设计版本一份测试报告（wrk + perf 同文件）。
 
 ---
 
@@ -8,9 +10,9 @@ v10.x **每个版本一张表**，仅三行：**背景 / 变更 / 结果**。**�
 
 | 项 | 内容 |
 |----|------|
-| 背景 | BENCH-001（v9）Keep-Alive 正常；`Connection: close` 重压测 SSH 假死。根因：`handleDead()` / `stop()` 每条断开同步 `std::cout` 到终端，短连接高 QPS 下 pty/SSH I/O 拖垮 2 核 2 GiB 小机 |
-| 变更 | `src/server/Connection.cpp` 删除 `handleDead()`、`stop()` 内 `connection break` 的 `std::cout`；保留 `main.cpp` 启停各一行；不做 AsyncLogger |
-| 结果 | Keep-Alive 主基线约 **32.8k RPS**（较 v9 ~29.2k 提升约 13%，含环境波动可能）；短连接轻量压测可完整跑完，SSH 稳定，v10.0 达成。详见 [`BENCH-002`](../benchmark_log/BENCH-002_20260523_wrk_v10.0.md) |
+| 背景 | v9：Keep-Alive 正常；`Connection: close` 重压测 SSH 假死。根因：`handleDead()` / `stop()` 每条断开同步 `std::cout` 到终端 |
+| 变更 | `src/server/Connection.cpp` 删除 `handleDead()`、`stop()` 内 `connection break` 的 `std::cout`；保留 `main.cpp` 启停各一行 |
+| 结果 | KA ~32.8k RPS；短连接轻量可跑完；perf 热点 **onHttp → ThreadPool::enqueue** 与 **sendHttpOnLoop → write**。详见 [`v10.0_20260523_bench`](../benchmark_log/v10.0_20260523_bench.md) |
 
 ---
 
@@ -18,16 +20,6 @@ v10.x **每个版本一张表**，仅三行：**背景 / 变更 / 结果**。**�
 
 | 项 | 内容 |
 |----|------|
-| 背景 | v10.0 wrk 基线（BENCH-002 ~33k RPS）完成；需 perf 定位 Keep-Alive 热路径，指导 v10.2 优化 |
-| 变更 | 新增 `scripts/perf_bench.sh`（删 build、RelWithDebInfo 重编、dwarf perf、火焰图）；首次 perf 采样 BENCH-003 |
-| 结果 | 用户态热点：**onHttp → ThreadPool::enqueue（futex ~4.3%）** 与 **sendHttpOnLoop → bufferToSck → write（~4.1%）**；解析不在栈前列。同跑 wrk ~41.5k RPS（不与 BENCH-002 严格对比）。详见 [`BENCH-003`](../benchmark_log/BENCH-003_20260523_perf_v10.1.md) |
-
----
-
-## v10.2
-
-| 项 | 内容 |
-|----|------|
-| 背景 | BENCH-003：Echo 场景 CPU 耗在线程双跳（I/O→worker→I/O 写）与写 syscall/内核 TCP，而非 HttpProcess 解析 |
-| 变更 | （待实施：如 I/O 线程直出静态 GET、写路径减拷贝、ThreadPool 唤醒优化等） |
-| 结果 | （待填：描述性结论 + [`BENCH-NNN`](../benchmark_log/) 链接；不写测试指令） |
+| 背景 | （待填：如 v10.0 结论——线程双跳与写路径为首要优化方向） |
+| 变更 | （待填：`src/` 代码优化） |
+| 结果 | （待填：描述性结论 + 链到 `benchmark_log/` 对应记录；不写测试指令） |

@@ -154,7 +154,7 @@ mini_web_server/
 │   └── open_issues.md             # 未修复 / 暂缓设计问题跟踪
 └── scripts/
     ├── SCRIPTS.md
-    └── up.sh
+    └── perf_bench.sh
 ```
 
 ## 近期稳定性修复

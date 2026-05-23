@@ -1,4 +1,4 @@
-# perf / 火焰图产物体积大，默认不入库；路径记在 BENCH 条目第 5 节
+# perf / 火焰图产物；命名 {版本}_*
 *
 !.gitignore
 !.gitkeep

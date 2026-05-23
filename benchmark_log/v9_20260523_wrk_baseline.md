@@ -1,4 +1,4 @@
-# BENCH-001：wrk 轻量基线（Keep-Alive 完成，短连接未完成）
+# v9：wrk 轻量基线（Keep-Alive 完成，短连接未完成）
 
 ---
 
@@ -6,10 +6,9 @@
 
 | 项 | 值 |
 |----|-----|
-| 编号 | BENCH-001 |
+| 设计版本 | v9 |
 | 日期 | 2026-05-23 |
 | 测试人 | luxiaohang |
-| 设计版本 | v9 |
 | 测试类型 | wrk 基线 |
 | 关联说明 | 含 FIX-034（`Buffer::bufToBuf`）；短连接 30s 用例运行中 SSH/会话断联，无完整输出 |
 
@@ -128,4 +127,4 @@ Transfer/sec:      2.11MB
 - **下一步**：
   1. 短连接改用更轻参数 + **server 日志重定向**（见 `benchmark_log/README.md`）；
   2. 用 **tmux** 跑 server，即使 SSH 抖一下也可 `tmux attach`；
-  3. 补跑 close 轻量用例后更新本表；perf 可先用 Keep-Alive 基线（~29k RPS）推进。
+  3. 补跑 close 轻量用例后更新本表；v10.0 已含 wrk+perf 见 [`v10.0_20260523_bench.md`](./v10.0_20260523_bench.md)。
