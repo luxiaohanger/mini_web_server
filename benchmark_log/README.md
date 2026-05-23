@@ -210,7 +210,27 @@ mkdir -p benchmark_log/artifacts
 
 SVG / `perf.data` 体积大，**默认不入库**；路径写入 BENCH 第 5 节。
 
-### tmux 分工（三窗格）
+### 一键脚本（推荐）
+
+依赖检查、wrk 压测、**dwarf 栈 perf 采样**、火焰图与文本报告一键完成：
+
+```bash
+# server 已在跑（tmux 窗格 A）
+bash scripts/perf_bench.sh -n 003
+
+# 自动后台起 server + 采样 + 产物写入 benchmark_log/artifacts/
+bash scripts/perf_bench.sh --start-server -n 003
+
+# 只检查环境
+bash scripts/perf_bench.sh check
+
+# 已有 perf.data，只重生火焰图
+bash scripts/perf_bench.sh flamegraph -n 003 -i benchmark_log/artifacts/BENCH-003_perf.data
+```
+
+产物：`BENCH-NNN_wrk.txt`、`BENCH-NNN_perf.data`、`BENCH-NNN_perf_report.txt`、`BENCH-NNN_flamegraph.svg`。详见 [`scripts/SCRIPTS.md`](../scripts/SCRIPTS.md)。
+
+### tmux 分工（手动）
 
 ```bash
 tmux new -s perf
@@ -310,15 +330,11 @@ cp perf.data benchmark_log/artifacts/BENCH-${NNN}_perf.data
 | RPS 低于 BENCH-002 | **预期**，perf 条目不与纯 wrk 比 |
 | `stackcollapse-perf.pl` 找不到 | 安装 FlameGraph 并加入 PATH |
 
-### perf 命令速查
+### perf 命令速查（手动）
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build -j2
-./build/src/server/server > /tmp/server.log 2>&1
-wrk -t2 -c20 -d30s http://127.0.0.1:8888/
-sudo perf record -F 997 -g -p $(pgrep -x server) -- sleep 30
-sudo perf report --stdio -g --no-children | head -80
-sudo perf script | stackcollapse-perf.pl | flamegraph.pl > benchmark_log/artifacts/BENCH-003_flamegraph.svg
+bash scripts/perf_bench.sh --start-server -n 003
 ```
 
 ---
