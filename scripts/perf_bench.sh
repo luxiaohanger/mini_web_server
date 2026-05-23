@@ -10,7 +10,7 @@ FLAMEGRAPH_DIR="${FLAMEGRAPH_DIR:-$HOME/FlameGraph}"
 SERVER_LOG="${SERVER_LOG:-/tmp/server.log}"
 BUILD_JOBS="${BUILD_JOBS:-$(nproc 2>/dev/null || echo 2)}"
 
-BENCH_NNN="003"
+BENCH_NNN=""
 DURATION=30
 WRK_THREADS=2
 WRK_CONNECTIONS=20
@@ -38,7 +38,7 @@ usage() {
   check        检查依赖与当前二进制符号（不重编）
 
 选项:
-  -n <NNN>     BENCH 编号（默认 003）
+  -n <NNN>     BENCH 编号（**必填**，run / flamegraph；无默认值）
   -d <秒>      wrk 与 perf 时长（默认 30）
   -t / -c      wrk 线程 / 连接数（默认 2 / 20）
   -u <url>     wrk URL（默认 http://127.0.0.1:8888/）
@@ -52,10 +52,14 @@ usage() {
   -h, --help
 
 示例:
-  bash scripts/perf_bench.sh -n 003
-  bash scripts/perf_bench.sh --skip-build -n 003
+  bash scripts/perf_bench.sh -n NNN
+  bash scripts/perf_bench.sh --skip-build -n NNN
   bash scripts/perf_bench.sh check
-  bash scripts/perf_bench.sh flamegraph -n 003 -i benchmark_log/artifacts/BENCH-003_perf.data
+  bash scripts/perf_bench.sh flamegraph -n NNN -i benchmark_log/artifacts/BENCH-NNN_perf.data
+
+说明:
+  - 未指定 -n，或 BENCH-NNN 对应产物/条目已存在 → 报错退出，不覆盖
+  - NNN 可写 3 或 003，统一格式化为三位数
 
 环境变量: BUILD_DIR, BUILD_JOBS, FLAMEGRAPH_DIR, ARTIFACTS_DIR, SERVER_LOG
 EOF
@@ -67,6 +71,50 @@ die() { printf '[perf_bench] 错误: %s\n' "$*" >&2; exit 1; }
 
 need_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "未找到命令: $1"
+}
+
+format_bench_nnn() {
+    printf '%03d' "$((10#$1))"
+}
+
+require_bench_nnn() {
+    [[ -n "$BENCH_NNN" ]] || die "缺少必需参数 -n <NNN>（BENCH 编号，例如 -n 4）"
+    [[ "$BENCH_NNN" =~ ^[0-9]+$ ]] || die "-n 须为非负整数: $BENCH_NNN"
+    BENCH_NNN=$(format_bench_nnn "$BENCH_NNN")
+    log "BENCH 编号: $BENCH_NNN"
+}
+
+# run：四类 artifacts + benchmark_log 条目均不可已存在
+assert_run_outputs_absent() {
+    local f
+    local -a dup=()
+    shopt -s nullglob
+    for f in \
+        "$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_wrk.txt" \
+        "$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_perf.data" \
+        "$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_perf_report.txt" \
+        "$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_flamegraph.svg" \
+        "$ROOT/benchmark_log"/BENCH-${BENCH_NNN}_*.md; do
+        [[ -e "$f" ]] && dup+=("$f")
+    done
+    shopt -u nullglob
+    if [[ ${#dup[@]} -gt 0 ]]; then
+        die "BENCH-${BENCH_NNN} 已有产物或条目，拒绝覆盖: ${dup[*]}"
+    fi
+}
+
+# flamegraph：仅检查将写入的 SVG / report
+assert_flamegraph_outputs_absent() {
+    local f
+    local -a dup=()
+    for f in \
+        "$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_perf_report.txt" \
+        "$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_flamegraph.svg"; do
+        [[ -e "$f" ]] && dup+=("$f")
+    done
+    if [[ ${#dup[@]} -gt 0 ]]; then
+        die "BENCH-${BENCH_NNN} 报告/火焰图已存在，拒绝覆盖: ${dup[*]}"
+    fi
 }
 
 ensure_flamegraph() {
@@ -234,6 +282,8 @@ cmd_check() {
 }
 
 cmd_flamegraph() {
+    require_bench_nnn
+    assert_flamegraph_outputs_absent
     local data="${PERF_DATA:-}"
     if [[ -z "$data" ]]; then
         if [[ -f "$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_perf.data" ]]; then
@@ -252,6 +302,9 @@ cmd_flamegraph() {
 
 cmd_run() {
     local wrk_out pid
+
+    require_bench_nnn
+    assert_run_outputs_absent
 
     need_cmd cmake
     need_cmd perf

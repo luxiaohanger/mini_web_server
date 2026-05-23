@@ -212,13 +212,13 @@ SVG / `perf.data` 体积大，**默认不入库**；路径写入 BENCH 第 5 节
 
 ### 一键脚本（推荐）
 
-**一条命令全自动**：停 server → 删 `build/` → RelWithDebInfo 重编（含调试符号与帧指针）→ 起 server → wrk+perf → 火焰图。**无需改 VS Code CMake 配置。**
+**一条命令全自动**：停 server → 删 `build/` → RelWithDebInfo 重编 → 起 server → wrk+perf → 火焰图。**须指定 `-n NNN`**（无默认值；产物或 `BENCH-NNN_*.md` 已存在则报错退出）。
 
 ```bash
-bash scripts/perf_bench.sh -n 003
+bash scripts/perf_bench.sh -n NNN
 ```
 
-已构建且不想重编时：`bash scripts/perf_bench.sh --skip-build -n 003`
+已构建且不想重编：`bash scripts/perf_bench.sh --skip-build -n NNN`
 
 产物：`BENCH-NNN_wrk.txt`、`BENCH-NNN_perf.data`、`BENCH-NNN_perf_report.txt`、`BENCH-NNN_flamegraph.svg`。详见 [`scripts/SCRIPTS.md`](../scripts/SCRIPTS.md)。
 
@@ -294,7 +294,7 @@ sudo perf report --stdio -g --no-children | tee /tmp/perf_report.txt
 **步骤 5 — 火焰图：**
 
 ```bash
-NNN=003   # 换成 BENCH 编号
+NNN=...   # 与 -n 一致
 sudo perf script | stackcollapse-perf.pl | flamegraph.pl \
   > benchmark_log/artifacts/BENCH-${NNN}_flamegraph.svg
 cp perf.data benchmark_log/artifacts/BENCH-${NNN}_perf.data
@@ -304,7 +304,7 @@ cp perf.data benchmark_log/artifacts/BENCH-${NNN}_perf.data
 
 ### perf 填表
 
-1. 复制 `TEMPLATE.md` → `BENCH-003_YYYYMMDD_perf_v10.1.md`
+1. 复制 `TEMPLATE.md` → `BENCH-NNN_YYYYMMDD_perf_v10.x.md`（NNN 与脚本输出一致）
 2. 元信息：`设计版本 = v10.1`，`测试类型 = perf 采样`
 3. 第 3 节：`RelWithDebInfo`
 4. 第 4 节：同跑 wrk 完整输出（备注：与 perf 同跑，RPS 不与 BENCH-002 比）
@@ -325,7 +325,7 @@ cp perf.data benchmark_log/artifacts/BENCH-${NNN}_perf.data
 ### perf 命令速查（手动）
 
 ```bash
-bash scripts/perf_bench.sh -n 003
+bash scripts/perf_bench.sh -n NNN
 ```
 
 ---
@@ -336,4 +336,4 @@ bash scripts/perf_bench.sh -n 003
 |------|----------|------|------|
 | BENCH-001 | v9 | [BENCH-001_20260523_wrk_baseline.md](./BENCH-001_20260523_wrk_baseline.md) | KA ~29k RPS；close 未完成 |
 | BENCH-002 | v10.0 | [BENCH-002_20260523_wrk_v10.0.md](./BENCH-002_20260523_wrk_v10.0.md) | KA ~33k RPS；close 轻量完成 |
-| BENCH-003 | v10.1 | （待建：perf 热点） | — |
+| BENCH-003 | v10.1 | [BENCH-003_20260523_perf_v10.1.md](./BENCH-003_20260523_perf_v10.1.md) | perf：enqueue+write 热点；同跑 ~41.5k RPS |

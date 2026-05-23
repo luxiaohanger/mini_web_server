@@ -18,9 +18,9 @@ v10.x **每个版本一张表**，仅三行：**背景 / 变更 / 结果**。**�
 
 | 项 | 内容 |
 |----|------|
-| 背景 | （待填） |
-| 变更 | （待填） |
-| 结果 | （待填：描述性结论 + [`BENCH-NNN`](../benchmark_log/) 链接；不写测试指令） |
+| 背景 | v10.0 wrk 基线（BENCH-002 ~33k RPS）完成；需 perf 定位 Keep-Alive 热路径，指导 v10.2 优化 |
+| 变更 | 新增 `scripts/perf_bench.sh`（删 build、RelWithDebInfo 重编、dwarf perf、火焰图）；首次 perf 采样 BENCH-003 |
+| 结果 | 用户态热点：**onHttp → ThreadPool::enqueue（futex ~4.3%）** 与 **sendHttpOnLoop → bufferToSck → write（~4.1%）**；解析不在栈前列。同跑 wrk ~41.5k RPS（不与 BENCH-002 严格对比）。详见 [`BENCH-003`](../benchmark_log/BENCH-003_20260523_perf_v10.1.md) |
 
 ---
 
@@ -28,6 +28,6 @@ v10.x **每个版本一张表**，仅三行：**背景 / 变更 / 结果**。**�
 
 | 项 | 内容 |
 |----|------|
-| 背景 | （待填） |
-| 变更 | （待填） |
+| 背景 | BENCH-003：Echo 场景 CPU 耗在线程双跳（I/O→worker→I/O 写）与写 syscall/内核 TCP，而非 HttpProcess 解析 |
+| 变更 | （待实施：如 I/O 线程直出静态 GET、写路径减拷贝、ThreadPool 唤醒优化等） |
 | 结果 | （待填：描述性结论 + [`BENCH-NNN`](../benchmark_log/) 链接；不写测试指令） |

@@ -195,11 +195,13 @@ bash scripts/up.sh [选项] [-n repeat | -t] [host] [port]
 
 **一条命令全自动**（无需改 VS Code CMake）：
 
+**须指定 `-n NNN`**（无默认值；重复编号报错不覆盖）：
+
 ```bash
-bash scripts/perf_bench.sh -n 003
+bash scripts/perf_bench.sh -n NNN
 ```
 
-流程：停 server → 删除 `build/` → **RelWithDebInfo** 重编（`-fno-omit-frame-pointer -g`）→ 后台起 server → wrk 压测 + **dwarf** perf 采样 → 火焰图 + 文本报告。
+流程：停 server → 删除 `build/` → **RelWithDebInfo** 重编 → 后台起 server → wrk + **dwarf** perf → 火焰图。
 
 ### 前置
 
@@ -209,17 +211,17 @@ bash scripts/perf_bench.sh -n 003
 ### 其他用法
 
 ```bash
-bash scripts/perf_bench.sh --skip-build -n 003   # 跳过重编（已编好时）
-bash scripts/perf_bench.sh check                 # 只检查依赖与符号
-bash scripts/perf_bench.sh --stop-server -n 003  # 结束后停 server
-bash scripts/perf_bench.sh flamegraph -n 003 -i benchmark_log/artifacts/BENCH-003_perf.data
+bash scripts/perf_bench.sh --skip-build -n NNN
+bash scripts/perf_bench.sh check
+bash scripts/perf_bench.sh --stop-server -n NNN
+bash scripts/perf_bench.sh flamegraph -n NNN -i benchmark_log/artifacts/BENCH-NNN_perf.data
 ```
 
 ### 常用选项
 
 | 选项 | 默认 | 说明 |
 |------|------|------|
-| `-n NNN` | 003 | BENCH 编号，产物文件名前缀 |
+| `-n NNN` | （必填） | BENCH 编号；对应产物或 md 条目已存在则拒绝执行 |
 | `-d 秒` | 30 | wrk 与 perf 采样时长 |
 | `-t` / `-c` | 2 / 20 | wrk 线程与连接数 |
 | `--fp` | — | 改用帧指针 `-g`（默认 dwarf） |
