@@ -14,6 +14,7 @@
 - 超时连接处理：`timerfd` + `TimerQueue`；Channel 激活续期 idle，到期 `handleDead`
 - 程序内停服：SIGINT / SIGTERM → `main` 控制线程 → Main/Sub Reactor 与 ThreadPool 有序 join
 - 设计文档与缺陷跟踪：`docs/DESIGN_v*.md`、`issue_log/`
+- 性能工程：wrk 吞吐基线 + perf 热点采样 : `benchmark_log/`
 
 
 ## 技术栈
@@ -24,6 +25,7 @@
 - **Concurrency**：线程池、互斥锁、条件变量、任务队列、I/O 与 worker 职责分离、`enqueueTask` 回投 owner loop、round-robin 连接分发、`working` 协调异步与半关闭。
 - **Buffer & Protocol**：应用层读写缓冲区、动态扩容、部分写与 EPOLLOUT 兜底；HTTP/1.1 最小子集（GET、Keep-Alive、短连接）；连接 idle 超时治理。
 - **Build & Tooling**：CMake 构建、Shell / tmux 脚本、HTTP 验收 client（`-n` / `-t`）。
+- **Performance Engineering**：wrk 回归验收（RPS / 延迟 / Errors）；`perf record` + 调用栈定位热点；`scripts/perf_bench.sh` 一键采样 + 结果写回 `benchmark_log/artifacts`
 
 ## 当前架构
 
@@ -139,22 +141,20 @@ mini_web_server/
 │   └── share/
 │       └── error_solve.cpp
 ├── docs/
-│   ├── DESIGN_v1.md
-│   ├── DESIGN_v2.md
-│   ├── DESIGN_v3.md
-│   ├── DESIGN_v4.md
-│   ├── DESIGN_v4pro.md
-│   ├── DESIGN_v5.md               
-│   ├── DESIGN_v6.md
-│   ├── DESIGN_v7.md
-│   ├── DESIGN_v8.md               
-│   └── DESIGN_v9.md               # 当前：程序内停服与退出闭环
+│   ├── DESIGN_v1.md … DESIGN_v9.md
+│   └── DESIGN_v10.md              # 压测与性能优化记录
+├── benchmark_log/
+│   ├── README.md                  # 命名规则、环境约束、wrk / perf 流程
+│   ├── TEMPLATE.md
+│   ├── v9_20260523_wrk_baseline.md
+│   ├── v10.0_20260523_bench.md    # v10.0：wrk + perf 报告
+│   └── artifacts/                 # perf.data / 火焰图等（产物不跟踪）
 ├── issue_log/
 │   ├── fixed_issues.md            # 已修复 / 已确认问题归档
 │   └── open_issues.md             # 未修复 / 暂缓设计问题跟踪
 └── scripts/
     ├── SCRIPTS.md
-    └── perf_bench.sh
+    └── perf_bench.sh              # RelWithDebInfo 重编 + wrk 负载 + perf 采样
 ```
 
 ## 近期稳定性修复
@@ -178,12 +178,21 @@ mini_web_server/
 
 详见 [问题清单](./issue_log/open_issues.md)。当前无 OPEN 缺陷条目。
 
+## 性能分析
+
+本项目在功能与稳定性闭环之后进入 **性能工程阶段（v10+）**：不凭直觉改代码，而是 **先度量、再画像、后优化、用同版本复测验收**。
+
+### 工程方法
+
+```text
+现象 / 瓶颈  →  可复现基线（wrk）  →  热点画像（perf）
+      ↑                                      |
+      └──── src 变更  ←  结论写入 DESIGN + benchmark_log
+```
+
 ## 未来方向
 
-- **Connection 职责拆分**（TcpConnection / HttpContext / State）
-- **Buffer 三段式重构**、**AsyncLogger**
-- **wrk / perf** 性能基线与热点优化
-- 可选演进：停服时 write drain / 超时强关
+- **v10.1+ 热点优化**：静态 GET / Echo I/O 直出、写路径减拷贝、ThreadPool 唤醒路径
 
 ## 演进记录
 
@@ -200,6 +209,7 @@ mini_web_server/
 - stage11 : **HTTP/1.1 最小实现**（合法 GET、Keep-Alive、短连接、非法→400）；`HttpProcess` + 验收 client；`handleDead` 对齐 `enqueueTask` 延迟 remove（FIX-026），详见 [架构设计 v7](/docs/DESIGN_v7.md)
 - stage12 : **TimerQueue + idle timeout**（`timerfd`、Channel 激活续期、约 60s 无 I/O 则 `handleDead`）；client `-t` / `-n`，详见 [架构设计 v8](/docs/DESIGN_v8.md)
 - stage13 : **程序内停服**（SIGINT/SIGTERM、`main` 控制线程、`Server::stop()`、Main/Sub `enqueueTask` 唤醒 loop）；`Connection::stop` 与 `handleDead` 分工，详见 [架构设计 v9](/docs/DESIGN_v9.md)
+- stage14 : **性能工程**（wrk 基线 + perf 热点；v10.0 移除热路径 `cout`；建立 `benchmark_log/` 与 `perf_bench.sh` 闭环；画像确认 enqueue 双跳与 write 为主热点），详见 [压测设计 v10](/docs/DESIGN_v10.md)
 
 ## Quick Start
 
