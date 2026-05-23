@@ -332,3 +332,13 @@
   - 调用约定：`main` 必须显式 `stop()`；`~Server()` 不兜底（DESIGN_v9 Q11）。
 - 验证：`kill -SIGTERM` 或 Ctrl+C 后进程正常退出，打印停服日志，各 I/O/worker 线程 join。
 
+## FIX-034 `Buffer::bufToBuf()` 拷贝长度与 `count` 不一致
+
+- 修复日期：2026-05-23
+- 状态：Fixed
+- 位置：`src/server/Buffer.cpp` `bufToBuf()`（约 85–87 行）
+- 影响：当 `count < readable()` 且 `count <= peer->writable()` 时，向对端 buffer **写入整段可读区**（`writeIdx - readIdx` 字节），但本端 `readIdx` 仅前进 `count`；对端可能越界写，本端读指针与真实已搬数据不一致，属于未定义行为。
+- 根因：`std::copy` 终点误用 `buf.begin() + writeIdx`（全部可读数据），而非按参数只搬 `count` 字节。
+- 修复：改为 `std::copy(buf.begin() + readIdx, buf.begin() + readIdx + count, peer->buf.begin() + peer->writeIdx)`，与 `readIdx += count` 语义一致。
+- 验证建议：构造 `readable() > count` 的源 buffer，调用 `bufToBuf` 后检查对端仅增加 `count` 字节、源端 `readable()` 减少 `count`；当前业务路径未调用该接口，属 API 正确性修复，后续 buffer 间搬运或重构可安全依赖。
+
