@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# perf + wrk 一键采样并生成火焰图（见 benchmark_log/README.md「perf 采样」）
+# perf 全自动：清 build → RelWithDebInfo 重编 → 起 server → wrk+perf → 火焰图
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -8,6 +8,7 @@ SERVER="${SERVER:-$BUILD_DIR/src/server/server}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-$ROOT/benchmark_log/artifacts}"
 FLAMEGRAPH_DIR="${FLAMEGRAPH_DIR:-$HOME/FlameGraph}"
 SERVER_LOG="${SERVER_LOG:-/tmp/server.log}"
+BUILD_JOBS="${BUILD_JOBS:-$(nproc 2>/dev/null || echo 2)}"
 
 BENCH_NNN="003"
 DURATION=30
@@ -17,49 +18,46 @@ WRK_URL="http://127.0.0.1:8888/"
 PERF_FREQ=997
 CALL_GRAPH="dwarf"
 DO_WARMUP=1
-START_SERVER=0
+DO_REBUILD=1
 STOP_SERVER=0
 SKIP_WRK=0
 PERF_DATA=""
 MODE="run"
+SERVER_STARTED=0
 
 usage() {
     cat <<'EOF'
 用法: bash scripts/perf_bench.sh [选项] [子命令]
 
+一条命令全自动（默认 run）:
+  停 server → 删除 build/ → RelWithDebInfo 重编 → 起 server → wrk+perf → 火焰图
+
 子命令:
-  run          完整流程：检查依赖 → wrk 压测 + perf 采样 → 火焰图 + 文本报告（默认）
-  flamegraph   仅从已有 perf.data 生成 SVG（须 -i 或项目根目录下的 perf.data）
-  check        只检查 perf / wrk / FlameGraph / server 二进制
+  run          完整流程（默认）
+  flamegraph   仅从已有 perf.data 生成 SVG + report
+  check        检查依赖与当前二进制符号（不重编）
 
 选项:
-  -n <NNN>     BENCH 编号，产物前缀 BENCH-NNN（默认 003）
-  -d <秒>      wrk 与 perf 采样时长（默认 30）
-  -t <threads> wrk -t（默认 2）
-  -c <conn>    wrk -c（默认 20）
-  -u <url>     wrk 目标 URL（默认 http://127.0.0.1:8888/）
-  -i <file>    已有 perf.data 路径（flamegraph 子命令）
-  --fp         perf 使用 -g（帧指针栈）；默认 --call-graph dwarf，符号更全
+  -n <NNN>     BENCH 编号（默认 003）
+  -d <秒>      wrk 与 perf 时长（默认 30）
+  -t / -c      wrk 线程 / 连接数（默认 2 / 20）
+  -u <url>     wrk URL（默认 http://127.0.0.1:8888/）
+  -i <file>    perf.data 路径（flamegraph 子命令）
+  -j <N>       cmake --build 并行数（默认 nproc）
+  --skip-build 跳过删 build 与重编（已编好时）
+  --fp         perf 用帧指针 -g（默认 dwarf）
   --no-warmup  跳过 wrk 5s 热身
-  --start-server  若 server 未运行则后台启动并重定向日志到 /tmp/server.log
-  --stop-server   采样结束后 SIGTERM 停掉 server（仅当本脚本 --start-server 拉起时）
-  --skip-wrk   不跑 wrk（server 已在其他负载下时可试）
-  -h, --help   显示本帮助
+  --stop-server  结束后 SIGTERM 停 server
+  --skip-wrk   只 perf，不跑 wrk
+  -h, --help
 
 示例:
-  bash scripts/perf_bench.sh
-  bash scripts/perf_bench.sh -n 003 -d 30
-  bash scripts/perf_bench.sh --start-server
+  bash scripts/perf_bench.sh -n 003
+  bash scripts/perf_bench.sh --skip-build -n 003
   bash scripts/perf_bench.sh check
-  bash scripts/perf_bench.sh flamegraph -n 003 -i ./perf.data
+  bash scripts/perf_bench.sh flamegraph -n 003 -i benchmark_log/artifacts/BENCH-003_perf.data
 
-环境变量:
-  BUILD_DIR, FLAMEGRAPH_DIR, ARTIFACTS_DIR, SERVER_LOG
-
-说明:
-  - 默认 dwarf 栈展开，减轻火焰图 [unknown]
-  - 建议二进制为 RelWithDebInfo；无符号时会警告但仍继续
-  - 产物: benchmark_log/artifacts/BENCH-NNN_flamegraph.svg 等（大文件默认 gitignore）
+环境变量: BUILD_DIR, BUILD_JOBS, FLAMEGRAPH_DIR, ARTIFACTS_DIR, SERVER_LOG
 EOF
 }
 
@@ -76,7 +74,7 @@ ensure_flamegraph() {
         if [[ -d "$FLAMEGRAPH_DIR/.git" ]]; then
             die "FlameGraph 目录不完整: $FLAMEGRAPH_DIR"
         fi
-        log "克隆 FlameGraph 到 $FLAMEGRAPH_DIR ..."
+        log "克隆 FlameGraph → $FLAMEGRAPH_DIR"
         need_cmd git
         git clone --depth 1 https://github.com/brendangregg/FlameGraph.git "$FLAMEGRAPH_DIR"
     fi
@@ -89,20 +87,18 @@ check_memory() {
     local avail_kb
     avail_kb="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
     if [[ "$avail_kb" -gt 0 && "$avail_kb" -lt 204800 ]]; then
-        warn "MemAvailable < 200 MiB ($(("$avail_kb" / 1024)) MiB)，perf+wrk 可能导致 swap/OOM"
+        warn "MemAvailable < 200 MiB ($(("avail_kb" / 1024)) MiB)，perf+wrk 可能 OOM"
     fi
 }
 
-check_server_binary() {
-    [[ -x "$SERVER" ]] || die "未找到 server: $SERVER（请先 RelWithDebInfo 构建）"
+verify_server_symbols() {
+    [[ -x "$SERVER" ]] || die "未找到 server: $SERVER"
     if readelf -S "$SERVER" 2>/dev/null | grep -q '\.debug_info'; then
-        log "server 含 .debug_info"
+        log "server 含 .debug_info ✓"
     elif file "$SERVER" | grep -q 'with debug_info'; then
-        log "server 含 debug_info"
+        log "server 含 debug_info ✓"
     else
-        warn "server 可能无调试符号；火焰图易出现 [unknown]。建议:"
-        warn "  cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \\"
-        warn "    -DCMAKE_CXX_FLAGS=\"-fno-omit-frame-pointer -g\" && cmake --build build -j2"
+        die "server 无调试符号，火焰图会出现 [unknown]；勿使用 --skip-build，或检查构建是否成功"
     fi
 }
 
@@ -120,9 +116,38 @@ server_pid() {
     pgrep -x server 2>/dev/null || true
 }
 
+stop_server() {
+    local pid
+    pid="$(server_pid)"
+    if [[ -n "$pid" ]]; then
+        log "停止 server PID=$pid"
+        kill -SIGTERM "$pid" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            [[ -z "$(server_pid)" ]] && return 0
+            sleep 0.25
+        done
+        warn "server 未在 5s 内退出，继续后续步骤"
+    fi
+}
+
+rebuild_for_perf() {
+    need_cmd cmake
+    stop_server
+    log "删除 $BUILD_DIR"
+    rm -rf "$BUILD_DIR"
+    log "RelWithDebInfo 配置（含 -fno-omit-frame-pointer -g）"
+    cmake -S "$ROOT" -B "$BUILD_DIR" \
+        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        -DCMAKE_CXX_FLAGS="-fno-omit-frame-pointer -g" \
+        -DCMAKE_C_FLAGS="-fno-omit-frame-pointer -g"
+    log "编译 server（-j${BUILD_JOBS}）..."
+    cmake --build "$BUILD_DIR" -j"$BUILD_JOBS"
+    verify_server_symbols
+}
+
 wait_server_ready() {
     local i
-    for i in $(seq 1 20); do
+    for i in $(seq 1 40); do
         if curl -sf -o /dev/null -m 1 "$WRK_URL"; then
             return 0
         fi
@@ -131,16 +156,16 @@ wait_server_ready() {
     die "server 未在 $WRK_URL 响应（见 $SERVER_LOG）"
 }
 
-start_server_if_needed() {
+start_server() {
     local pid
     pid="$(server_pid)"
     if [[ -n "$pid" ]]; then
         log "server 已运行 PID=$pid"
         return 0
     fi
-    [[ "$START_SERVER" -eq 1 ]] || die "server 未运行。请先启动 server，或加 --start-server"
     log "后台启动 server → $SERVER_LOG"
     "$SERVER" >"$SERVER_LOG" 2>&1 &
+    SERVER_STARTED=1
     wait_server_ready
     pid="$(server_pid)"
     log "server PID=$pid"
@@ -176,8 +201,6 @@ generate_flamegraph() {
     local svg="$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_flamegraph.svg"
     [[ -f "$data" ]] || die "perf.data 不存在: $data"
     ensure_flamegraph
-    need_cmd stackcollapse-perf.pl
-    need_cmd flamegraph.pl
     log "生成火焰图 → $svg"
     perf_cmd script -i "$data" | stackcollapse-perf.pl | flamegraph.pl >"$svg"
     log "火焰图: $svg ($(wc -c <"$svg" | tr -d ' ') bytes)"
@@ -193,21 +216,20 @@ generate_report() {
 
 cmd_check() {
     log "项目根: $ROOT"
+    need_cmd cmake
     need_cmd perf
     need_cmd wrk
     need_cmd curl
-    check_server_binary
+    if [[ -x "$SERVER" ]]; then
+        verify_server_symbols
+    else
+        warn "server 未构建: $SERVER（run 子命令会自动重编）"
+    fi
     ensure_flamegraph
-    log "stackcollapse-perf.pl=$(command -v stackcollapse-perf.pl)"
-    log "flamegraph.pl=$(command -v flamegraph.pl)"
     check_memory
     local pid
     pid="$(server_pid)"
-    if [[ -n "$pid" ]]; then
-        log "server 运行中 PID=$pid"
-    else
-        warn "server 未运行"
-    fi
+    [[ -n "$pid" ]] && log "server 运行中 PID=$pid" || log "server 未运行"
     log "检查通过"
 }
 
@@ -219,7 +241,7 @@ cmd_flamegraph() {
         elif [[ -f "$ROOT/perf.data" ]]; then
             data="$ROOT/perf.data"
         else
-            die "未找到 perf.data，请用 -i 指定路径"
+            die "未找到 perf.data，请用 -i 指定"
         fi
     fi
     log "使用 perf.data: $data"
@@ -229,24 +251,27 @@ cmd_flamegraph() {
 }
 
 cmd_run() {
-    local wrk_out report started=0
-    local pid
+    local wrk_out pid
 
+    need_cmd cmake
     need_cmd perf
     need_cmd wrk
     need_cmd curl
-    check_server_binary
     ensure_flamegraph
     check_memory
     mkdir -p "$ARTIFACTS_DIR"
 
-    if [[ "$START_SERVER" -eq 1 ]]; then
-        start_server_if_needed
-        started=1
+    if [[ "$DO_REBUILD" -eq 1 ]]; then
+        rebuild_for_perf
+    else
+        verify_server_symbols
+        stop_server
     fi
 
+    start_server
+
     pid="$(server_pid)"
-    [[ -n "$pid" ]] || die "server 未运行（加 --start-server 或手动启动）"
+    [[ -n "$pid" ]] || die "server 启动失败"
     log "采样目标 server PID=$pid"
 
     wrk_out="$ARTIFACTS_DIR/BENCH-${BENCH_NNN}_wrk.txt"
@@ -271,20 +296,14 @@ cmd_run() {
     generate_flamegraph "$PERF_DATA"
     generate_report "$PERF_DATA"
 
-    log "完成。产物目录: $ARTIFACTS_DIR"
+    log "完成 → $ARTIFACTS_DIR"
     log "  wrk:        BENCH-${BENCH_NNN}_wrk.txt"
     log "  perf.data:  BENCH-${BENCH_NNN}_perf.data"
     log "  report:     BENCH-${BENCH_NNN}_perf_report.txt"
     log "  flamegraph: BENCH-${BENCH_NNN}_flamegraph.svg"
 
-    if [[ "$started" -eq 1 && "$STOP_SERVER" -eq 1 ]]; then
-        local spid
-        spid="$(server_pid)"
-        if [[ -n "$spid" ]]; then
-            log "停止本脚本拉起的 server PID=$spid"
-            kill -SIGTERM "$spid" 2>/dev/null || true
-            wait "$spid" 2>/dev/null || true
-        fi
+    if [[ "$STOP_SERVER" -eq 1 ]]; then
+        stop_server
     fi
 }
 
@@ -318,6 +337,14 @@ while [[ $# -gt 0 ]]; do
             PERF_DATA="$2"
             shift 2
             ;;
+        -j)
+            BUILD_JOBS="$2"
+            shift 2
+            ;;
+        --skip-build)
+            DO_REBUILD=0
+            shift
+            ;;
         --fp)
             CALL_GRAPH="fp"
             shift
@@ -326,16 +353,16 @@ while [[ $# -gt 0 ]]; do
             DO_WARMUP=0
             shift
             ;;
-        --start-server)
-            START_SERVER=1
-            shift
-            ;;
         --stop-server)
             STOP_SERVER=1
             shift
             ;;
         --skip-wrk)
             SKIP_WRK=1
+            shift
+            ;;
+        --start-server)
+            warn "--start-server 已废弃：run 默认自动停服、重编、起 server"
             shift
             ;;
         -h | --help)
@@ -352,8 +379,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$MODE" in
-    check) cmd_check ;;
-    flamegraph) cmd_flamegraph ;;
+    check) DO_REBUILD=0; cmd_check ;;
+    flamegraph) DO_REBUILD=0; cmd_flamegraph ;;
     run) cmd_run ;;
     *) usage >&2; exit 1 ;;
 esac

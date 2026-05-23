@@ -212,21 +212,13 @@ SVG / `perf.data` 体积大，**默认不入库**；路径写入 BENCH 第 5 节
 
 ### 一键脚本（推荐）
 
-依赖检查、wrk 压测、**dwarf 栈 perf 采样**、火焰图与文本报告一键完成：
+**一条命令全自动**：停 server → 删 `build/` → RelWithDebInfo 重编（含调试符号与帧指针）→ 起 server → wrk+perf → 火焰图。**无需改 VS Code CMake 配置。**
 
 ```bash
-# server 已在跑（tmux 窗格 A）
 bash scripts/perf_bench.sh -n 003
-
-# 自动后台起 server + 采样 + 产物写入 benchmark_log/artifacts/
-bash scripts/perf_bench.sh --start-server -n 003
-
-# 只检查环境
-bash scripts/perf_bench.sh check
-
-# 已有 perf.data，只重生火焰图
-bash scripts/perf_bench.sh flamegraph -n 003 -i benchmark_log/artifacts/BENCH-003_perf.data
 ```
+
+已构建且不想重编时：`bash scripts/perf_bench.sh --skip-build -n 003`
 
 产物：`BENCH-NNN_wrk.txt`、`BENCH-NNN_perf.data`、`BENCH-NNN_perf_report.txt`、`BENCH-NNN_flamegraph.svg`。详见 [`scripts/SCRIPTS.md`](../scripts/SCRIPTS.md)。
 
@@ -333,8 +325,7 @@ cp perf.data benchmark_log/artifacts/BENCH-${NNN}_perf.data
 ### perf 命令速查（手动）
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build -j2
-bash scripts/perf_bench.sh --start-server -n 003
+bash scripts/perf_bench.sh -n 003
 ```
 
 ---

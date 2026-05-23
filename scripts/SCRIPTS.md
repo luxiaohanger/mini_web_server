@@ -193,30 +193,25 @@ bash scripts/up.sh [选项] [-n repeat | -t] [host] [port]
 
 ## perf 采样与火焰图（`perf_bench.sh`）
 
-一键完成：依赖检查 → wrk 压测 + perf 采样（默认 **dwarf 栈**，减轻 `[unknown]`）→ 火焰图 + 文本报告。
+**一条命令全自动**（无需改 VS Code CMake）：
+
+```bash
+bash scripts/perf_bench.sh -n 003
+```
+
+流程：停 server → 删除 `build/` → **RelWithDebInfo** 重编（`-fno-omit-frame-pointer -g`）→ 后台起 server → wrk 压测 + **dwarf** perf 采样 → 火焰图 + 文本报告。
 
 ### 前置
 
-- 二进制建议 **RelWithDebInfo**（VS Code CMake 选 Build Type 后全量构建）
-- 已安装 `perf`、`wrk`
-- FlameGraph 未安装时脚本会自动 `git clone` 到 `~/FlameGraph`
+- 已安装 `perf`、`wrk`、`cmake`（Linux 服务器）
+- FlameGraph 未安装时脚本自动 `git clone` 到 `~/FlameGraph`
 
-### 用法
+### 其他用法
 
 ```bash
-# server 已在跑（推荐：tmux 窗格 A 常驻 server）
-bash scripts/perf_bench.sh -n 003
-
-# 自动后台启动 server（日志 /tmp/server.log），采样完保留 server
-bash scripts/perf_bench.sh --start-server -n 003
-
-# 采样完并停掉本脚本拉起的 server
-bash scripts/perf_bench.sh --start-server --stop-server -n 003
-
-# 只检查 perf / wrk / FlameGraph / 二进制符号
-bash scripts/perf_bench.sh check
-
-# 从已有 perf.data 只生成 SVG + report
+bash scripts/perf_bench.sh --skip-build -n 003   # 跳过重编（已编好时）
+bash scripts/perf_bench.sh check                 # 只检查依赖与符号
+bash scripts/perf_bench.sh --stop-server -n 003  # 结束后停 server
 bash scripts/perf_bench.sh flamegraph -n 003 -i benchmark_log/artifacts/BENCH-003_perf.data
 ```
 
@@ -228,8 +223,8 @@ bash scripts/perf_bench.sh flamegraph -n 003 -i benchmark_log/artifacts/BENCH-00
 | `-d 秒` | 30 | wrk 与 perf 采样时长 |
 | `-t` / `-c` | 2 / 20 | wrk 线程与连接数 |
 | `--fp` | — | 改用帧指针 `-g`（默认 dwarf） |
-| `--no-warmup` | — | 跳过 wrk 5s 热身 |
-| `--skip-wrk` | — | 不跑 wrk，仅 perf |
+| `--skip-build` | — | 跳过删 build 与重编 |
+| `--stop-server` | — | 采样结束后停 server |
 
 ### 产物（`benchmark_log/artifacts/`）
 
@@ -241,20 +236,6 @@ bash scripts/perf_bench.sh flamegraph -n 003 -i benchmark_log/artifacts/BENCH-00
 | `BENCH-NNN_flamegraph.svg` | 火焰图 |
 
 大文件默认被 `artifacts/.gitignore` 忽略；路径与热点摘要写入 BENCH 条目第 5 节。流程说明见 [`benchmark_log/README.md`](../benchmark_log/README.md)。
-
-### 仍有大量 `[unknown]`
-
-1. 确认 RelWithDebInfo 全量重编：`bash scripts/perf_bench.sh check`
-2. 脚本已默认 dwarf；若仍不行，重编时加帧指针：
-
-```bash
-cmake -S . -B build \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DCMAKE_CXX_FLAGS="-fno-omit-frame-pointer -g" \
-  -DCMAKE_C_FLAGS="-fno-omit-frame-pointer -g"
-cmake --build build -j2 --clean-first
-bash scripts/perf_bench.sh --start-server -n 003
-```
 
 ---
 
