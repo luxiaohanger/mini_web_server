@@ -82,7 +82,7 @@ ssize_t Buffer::bufferToSck(Socket* sck, size_t count) {
 void Buffer::bufToBuf(Buffer* peer, size_t count) {
     errif(count > this->readable(), "Not have enough data");
     if (count <= peer->writable()) {
-        std::copy(buf.begin() + readIdx, buf.begin() + writeIdx,
+        std::copy(buf.begin() + readIdx, buf.begin() + readIdx + count,
                   peer->buf.begin() + peer->writeIdx);
         readIdx += count;
         if (readIdx == writeIdx) {

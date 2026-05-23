@@ -4,7 +4,6 @@
 #include <string.h>
 
 #include <functional>
-#include <iostream>
 
 #include "Buffer.h"
 #include "Channel.h"
@@ -202,7 +201,6 @@ void Connection::handleDead() {
     state = ConnState::dead;
     channel->remove();
     deleteTimerCallBack(timerId);
-    std::cout << "client " << sck->getFd() << " connection break\n";
     // 注入任务队列，防止本次channel没有响应完成就析构
     eloop->enqueueTask(
         [self]() { self->removeConnectionCallBack(self->sck.get()); });
@@ -214,5 +212,4 @@ void Connection::stop() {
     state = ConnState::dead;
     channel->remove();
     deleteTimerCallBack(timerId);
-    std::cout << "client " << sck->getFd() << " connection break\n";
 }
