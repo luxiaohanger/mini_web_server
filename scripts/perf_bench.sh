@@ -57,7 +57,7 @@ usage() {
   PERF_REPORT_PERCENT_LIMIT  符号表阈值 %（默认 0.1，§0 不受限）
   PERF_BENCH_FORCE=1           跳过覆盖确认
 
-符号表: §0 预算 + §1 server + §2/§3 kernel + §4 libc；调用链见 SVG。
+符号表: §0 预算 + §1 server + §2 kernel + §3 libc（各含分类/符号子段）；调用链见 SVG。
 详情: scripts/SCRIPTS.md
 
 示例:
@@ -371,7 +371,7 @@ run_perf_report_flat() {
     return 0
 }
 
-# 从 perf report flat（--sort comm,dso,symbol -g none）一次解析并写入 §0～§4。
+# 从 perf report flat（--sort comm,dso,symbol -g none）一次解析并写入 §0～§3。
 render_unified_perf_report() {
     local flat="$1" limit="$2" report="$3"
     local server_dso
@@ -469,6 +469,35 @@ render_unified_perf_report() {
         }
         return "other"
     }
+    function libc_base(sym,    s) {
+        s = sym_clean(sym)
+        sub(/^__GI___/, "", s)
+        sub(/^__GI_/, "", s)
+        sub(/^__libc_/, "", s)
+        return s
+    }
+    function libc_category(sym,    s) {
+        s = libc_base(sym)
+        if (s ~ /^(read|write|readv|writev|recv|send|recvfrom|sendto|recvmsg|sendmsg|pread|pwrite|__read|__write)/) {
+            return "io"
+        }
+        if (s ~ /^epoll_/) {
+            return "epoll"
+        }
+        if (s ~ /^timerfd_/) {
+            return "timer"
+        }
+        if (s ~ /^(malloc|free|calloc|realloc|mmap|munmap|mremap|brk|posix_memalign|memalign)/) {
+            return "alloc"
+        }
+        if (s ~ /^(memcpy|memmove|memset|memcmp|memchr|strcpy|strncpy|strlen|strcmp|strncmp)/) {
+            return "string"
+        }
+        if (s ~ /^(pthread_|__pthread_)/) {
+            return "pthread"
+        }
+        return "other"
+    }
     function sort_order(pct, order, nout,    i, j, t) {
         for (i = 1; i <= nout; i++) {
             for (j = i + 1; j <= nout; j++) {
@@ -486,6 +515,33 @@ render_unified_perf_report() {
             }
             order_t[++n] = s
             pct_t[s] = ksym_self[s]
+        }
+        if (n == 0) {
+            return "-"
+        }
+        sort_order(pct_t, order_t, n)
+        if (n > 3) {
+            n = 3
+        }
+        line = ""
+        for (i = 1; i <= n; i++) {
+            if (line != "") {
+                line = line ", "
+            }
+            line = line sym_clean(order_t[i])
+        }
+        delete order_t
+        delete pct_t
+        return line
+    }
+    function top_syms_for_lcat(cat,    s, n, i, line) {
+        n = 0
+        for (s in libsym_self) {
+            if (libc_category(s) != cat) {
+                continue
+            }
+            order_t[++n] = s
+            pct_t[s] = libsym_self[s]
         }
         if (n == 0) {
             return "-"
@@ -525,6 +581,8 @@ render_unified_perf_report() {
         }
         if (is_libc_dso(dso) && selfpct + 0 > 0) {
             libsym_self[sym] += selfpct
+            lcat = libc_category(sym)
+            lcat_self[lcat] += selfpct
         }
     }
     BEGIN {
@@ -565,7 +623,7 @@ render_unified_perf_report() {
         print "# === §0 CPU 预算（互斥）==="
         print "# 含义: 采样时 PC 落在哪个共享库/模块（Self），每个样本只计一次。"
         print "# 分母: 全部 CPU 样本（本表各行 Self 相加 ≈ 100%）。"
-        print "# 读法: kernel 高 → 看 §2/§3；server 高 → 看 §1。"
+        print "# 读法: kernel 高 → 看 §2；libc 高 → 看 §3；server 高 → 看 §1。"
         print "# Self%   层级"
         split(bucket_list, bl, " ")
         nb = 0
@@ -602,28 +660,8 @@ render_unified_perf_report() {
             }
         }
         print ""
-        print "# === §2 kernel（Self）==="
-        print "# 含义: PC 落在 [kernel.kallsyms] 的样本占比（已去掉 [k] 前缀显示）。"
-        print "# 分母: 全部 CPU 样本。定内核热点看 Self 降序。"
-        print "# Self%   Symbol"
-        nk = 0
-        for (s in ksym_self) {
-            if (ksym_self[s] + 0 >= limit + 0) {
-                order_k[++nk] = s
-                pct_k[s] = ksym_self[s]
-            }
-        }
-        sort_order(pct_k, order_k, nk)
-        if (nk == 0) {
-            print "# (无 ≥ " limit "% 的内核符号)"
-        } else {
-            for (i = 1; i <= nk; i++) {
-                s = order_k[i]
-                printf " %7.2f%%  %s\n", pct_k[s], sym_clean(s)
-            }
-        }
-        print ""
-        print "# === §3 kernel 分类（Self，互斥）==="
+        print "# === §2 kernel ==="
+        print "# --- 分类（Self，互斥）---"
         print "# 含义: 内核样本按符号归入 syscall/network/futex/sched/other。"
         print "# 分母: 全部 CPU 样本；各行 Self 相加 ≈ §0 的 kernel 行。"
         print "# Self%   类别        代表符号（该类别 Self top3）"
@@ -645,10 +683,51 @@ render_unified_perf_report() {
                 printf " %7.2f%%  %-10s  %s\n", pct_c[c], c, top_syms_for_cat(c)
             }
         }
+        print "# --- 符号（Self，≥ " limit "%）---"
+        print "# 含义: PC 落在 [kernel.kallsyms] 的样本（已去掉 [k] 前缀显示）。"
+        print "# Self%   Symbol"
+        nk = 0
+        for (s in ksym_self) {
+            if (ksym_self[s] + 0 >= limit + 0) {
+                order_k[++nk] = s
+                pct_k[s] = ksym_self[s]
+            }
+        }
+        sort_order(pct_k, order_k, nk)
+        if (nk == 0) {
+            print "# (无 ≥ " limit "% 的内核符号)"
+        } else {
+            for (i = 1; i <= nk; i++) {
+                s = order_k[i]
+                printf " %7.2f%%  %s\n", pct_k[s], sym_clean(s)
+            }
+        }
         print ""
-        print "# === §4 libc（Self）==="
+        print "# === §3 libc ==="
+        print "# --- 分类（Self，互斥）---"
+        print "# 含义: libc 样本按符号归入 io/epoll/timer/alloc/pthread/string/other。"
+        print "# 分母: 全部 CPU 样本；各行 Self 相加 ≈ §0 的 libc 行（libpthread 在 §0 单独一行）。"
+        print "# Self%   类别        代表符号（该类别 Self top3）"
+        split("io epoll timer alloc pthread string other", ll, " ")
+        nlc = 0
+        for (i = 1; i <= 7; i++) {
+            c = ll[i]
+            if (lcat_self[c] + 0 > 0) {
+                order_lc[++nlc] = c
+                pct_lc[c] = lcat_self[c]
+            }
+        }
+        sort_order(pct_lc, order_lc, nlc)
+        if (nlc == 0) {
+            print "# (无 libc 样本)"
+        } else {
+            for (i = 1; i <= nlc; i++) {
+                c = order_lc[i]
+                printf " %7.2f%%  %-10s  %s\n", pct_lc[c], c, top_syms_for_lcat(c)
+            }
+        }
+        print "# --- 符号（Self，≥ " limit "%）---"
         print "# 含义: PC 落在 libc 的样本（read/write/epoll 等，原始符号名）。"
-        print "# 分母: 全部 CPU 样本。与 §1 All 不同：此处不含 server inclusive。"
         print "# Self%   Symbol"
         nl = 0
         for (s in libsym_self) {
@@ -678,7 +757,7 @@ generate_report() {
     limit="$PERF_REPORT_PERCENT_LIMIT"
     flat="$(mktemp "${report}.flat.XXXXXX")"
 
-    log "perf 符号表 → $report（§0～§4，阈值 ≥ ${limit}%）"
+    log "perf 符号表 → $report（§0～§3，阈值 ≥ ${limit}%）"
     # 必须与 §1 相同排序，保证每行带 Shared Object（DSO）列；--sort dso,symbol 会缺 DSO 列导致 §0 全落 other
     if ! run_perf_report_flat "$data" "$flat" --stdio --sort comm,dso,symbol \
         --percent-limit 0 -g none; then
@@ -691,9 +770,9 @@ generate_report() {
         printf '# 源文件: %s\n' "$(basename "$data")"
         printf '# 火焰图: %s_flamegraph.svg\n' "$base"
         printf '#\n'
-        printf '# 阅读顺序: §0 预算 → §1 server → §2/§3 内核 → §4 libc → SVG 看路径\n'
+        printf '# 阅读顺序: §0 预算 → §2/§3 分类 → §1 server → §2/§3 符号（可选）→ SVG\n'
         printf '# 全局分母: 全部 CPU 样本（perf record 采样总数）。\n'
-        printf '# 行过滤: §0/§3 不过滤；§1/§2/§4 仅输出 ≥ %s%% 的符号行。\n' "$limit"
+        printf '# 行过滤: §0 与 §2/§3 分类不过滤；§1 与 §2/§3 符号段仅输出 ≥ %s%% 的符号行。\n' "$limit"
         printf '#\n'
     } >"$report"
     render_unified_perf_report "$flat" "$limit" "$report"
@@ -799,7 +878,7 @@ cmd_run() {
     log "完成 → $ARTIFACTS_DIR"
     log "  wrk:        ${base}_wrk.txt"
     log "  perf.data:  ${base}_perf.data"
-    log "  report:     ${base}_perf_report.txt（§0～§4，≥${PERF_REPORT_PERCENT_LIMIT}%）"
+    log "  report:     ${base}_perf_report.txt（§0～§3，≥${PERF_REPORT_PERCENT_LIMIT}%）"
     log "  flamegraph: ${base}_flamegraph.svg（调用链）"
     log "请更新或新建 benchmark_log/${DESIGN_VER}_YYYYMMDD_bench.md（wrk + perf 同一份）"
 

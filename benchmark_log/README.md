@@ -24,7 +24,7 @@
 - **内存紧张**：高 `-c` 易触发 swap / OOM，表现为 SSH 卡死、会话断联；基线阶段**不要用 `-c50` / `-c100`**。
 - 推荐 **tmux**（`tmux new -s bench`），SSH 断开仍可 `tmux attach` 恢复。
 - 压测前、压测中执行 `free -h`；**available 内存持续 < 200 MiB** 或 swap 活跃时立即停止。
-- **perf 里的 wrk 只造负载**：版本验收 RPS 以 §4 纯 wrk（Release）为准，不与 perf 同跑时的 RPS 对比。
+- **perf 里的 wrk 只造负载**：版本验收 RPS 以**第 4 节**纯 wrk（Release）为准，不与 perf 同跑时的 RPS 对比。
 
 ## 命名规则
 
@@ -51,7 +51,7 @@
 
 1. 复制 [`TEMPLATE.md`](./TEMPLATE.md) 为新文件，按上表命名。
 2. 元信息填 **设计版本** 与日期。
-3. 按模板填写环境、命令、**完整原始输出**与汇总表（§4 wrk、§5 perf；**测试人**统一填 `luxiaohang`）。
+3. 按模板填写环境、命令、汇总表（**第 4 节** wrk、**第 5 节** perf；**测试人**统一填 `luxiaohang`）。
 4. 更新本文「索引」表（**仅追加**新版本行，不改旧报告内容）；**仅 src 代码变更时**在 `docs/DESIGN_v10.md` **追加**下一 v10.x 小节，不改写已有小节。
 
 ## 测试阶段顺序（示例）
@@ -217,22 +217,23 @@ mkdir -p benchmark_log/artifacts
 
 ### 产物
 
-路径 `benchmark_log/artifacts/`（SVG / perf.data 默认不入库，写入该版本报告 §5）：
+路径 `benchmark_log/artifacts/`（SVG / perf.data 默认不入库，写入该版本报告**第 5 节**）：
 
 | 文件 | 内容 |
 |------|------|
 | `{版本}_wrk.txt` | 同跑 wrk 输出（**RPS 不作版本验收**） |
 | `{版本}_perf.data` | perf 原始数据 |
-| `{版本}_perf_report.txt` | **分层符号表**（§0～§4；§1/§2/§4 符号行 ≥ 0.1%） |
+| `{版本}_perf_report.txt` | **分层符号表**（§0～§3） |
 | `{版本}_flamegraph.svg` | **火焰图**（调用链，浏览器打开） |
 
-> 符号表：**§0 预算 → §1 server → §2/§3 kernel → §4 libc**；一次 `perf report --sort comm,dso,symbol` 解析。
+> **序号约定**：测试报告 md 用 **第 N 节**；`*_perf_report.txt` 用 **§0～§3**（与「第 5 节 perf」无关）。  
+> 符号表结构：**§0 预算 → §1 server → §2 kernel（分类+符号）→ §3 libc（分类+符号）**。
 
 ### 读 perf 产物（符号表 + 火焰图）
 
 | 产物 | 回答的问题 | 怎么用 |
 |------|------------|--------|
-| **`_perf_report.txt` 符号表** | CPU 落在哪一层、src 该动哪 | 先 §0 预算，再 §1 **All**，§3 看内核构成 |
+| **`_perf_report.txt` 符号表** | CPU 落在哪一层、src 该动哪 | §0 预算 → §2/§3 分类 → §1 **All** |
 | **`_flamegraph.svg` 火焰图** | 调用链 | 浏览器 Search |
 
 **§0 CPU 预算（Self，互斥）**
@@ -248,18 +249,16 @@ mkdir -p benchmark_log/artifacts
 - **Self**：PC 仅落在该 server 函数体内；Self 低而 All 高 → 时间在下游（enqueue、write、内核）
 - **勿** 将各行百分比相加（父子行重叠）；`invoke`/`lambda` 多为 `std::function` 间接调用
 
-**§2 kernel 符号（Self）**
+**§2 kernel**
 
-- 原始内核符号表（显示时去掉 `[k]` 前缀）；Overhead ≥ `PERF_REPORT_PERCENT_LIMIT`（默认 0.1%）
+- **分类（Self，互斥）**：`syscall` / `network` / `futex` / `sched` / `other`；各行相加 ≈ §0 的 `kernel` 行
+- **符号（Self）**：原始内核符号，Overhead ≥ `PERF_REPORT_PERCENT_LIMIT`（默认 0.1%）
 
-**§3 kernel 分类（Self，互斥）**
+**§3 libc**
 
-- 将 §2 符号归入：`syscall` / `network` / `futex` / `sched` / `other`
-- 各行相加 ≈ §0 的 `kernel` 行
-
-**§4 libc（Self）**
-
-- `libc.so.6` 符号；看 readv/write/epoll/pthread/malloc 等
+- **分类（Self，互斥）**：`io` / `epoll` / `timer` / `alloc` / `pthread` / `string` / `other`；各行相加 ≈ §0 的 `libc` 行（`libpthread` 在 §0 单独一行）
+- **符号（Self）**：原始 libc 符号，≥ 阈值
+- **读法**：`io` 高 → 读写封装热；与 §2 `network` 对照区分「libc 封装 vs 内核协议栈」
 
 **火焰图**
 
@@ -270,29 +269,29 @@ mkdir -p benchmark_log/artifacts
 
 **推荐流程（定方向 → 落方案）**
 
-1. 符号表：§0 预算 → §3 内核构成 → §1 server 按 **All** 排序 → §4 libc。
+1. 符号表：§0 预算 → §2 分类 → §3 分类 → §1 server 按 **All** 排序。
 2. 火焰图：对 §1 前几名 Search，确认从 `EventLoop::loop` 等根上的调用分支。
-3. 将结论写入该版本报告 §5.3「热点摘要」与 §6「分析结果」。
-4. wrk RPS 仍以报告 §4 为准；perf 只说明 CPU 花在哪，不代替版本验收。
+3. 将结论写入该版本报告 **5.3 热点摘要** 与 **第 6 节分析**。
+4. wrk RPS 仍以**第 4 节**为准；perf 只说明 CPU 花在哪，不代替版本验收。
 
 ### 用途与注意
 
 | 目标 | 说明 |
 |------|------|
-| 定 CPU 优化方向 | 先读 §0 预算，再 §1 **All**（enqueue、onHttp、EventLoop 等）与 §3 内核构成 |
+| 定 CPU 优化方向 | §0 预算 → §1 **All** → §2/§3 分类 |
 | 定具体改哪条路径 | 再读 **火焰图** 里对应宽条的上游 caller |
 | 指导下一版 src | 优先动符号表与火焰图 **都宽** 的用户态路径 |
 | **不是** | 再验 wrk RPS；同跑 wrk 仅保证采样期间有负载 |
 
-脚本内 wrk 参数：`wrk -t2 -c20 -d30s`（Keep-Alive）。**不要**把 `{版本}_wrk.txt` 里的 RPS 与「手动 wrk」§4 对比。
+脚本内 wrk 参数：`wrk -t2 -c20 -d30s`（Keep-Alive）。**不要**把 `{版本}_wrk.txt` 里的 RPS 与**第 4 节**手动 wrk 对比。
 
 同版本产物已存在时，脚本会列出路径并询问 `[y/N]` 是否覆盖；确认后 **先删除** 旧文件（`run` 含 `perf.data`，`flamegraph` 仅删 report/SVG），再重新生成。非交互可设 `PERF_BENCH_FORCE=1`。
 
 ### 填表
 
-1. 在**该版本**报告 md 中填写 §5（与 §4 wrk 同文件）
+1. 在**该版本**报告 md 中填写**第 5 节**（与**第 4 节** wrk 同文件）
 2. 元信息：**设计版本**、测试类型
-3. 第 5 节：产物路径用 `{版本}_*` 格式；§5.3 热点摘要（§0 + §1 + §3 + 火焰图）；§6 写结论/异常/下一步
+3. **5.3** 热点摘要（符号 §0 + §1 + §2 分类 + §3 分类）；**第 6 节**按 wrk / 符号 §0～§3 分层写分析
 
 ### 常见问题
 
@@ -304,7 +303,7 @@ mkdir -p benchmark_log/artifacts
 | 符号表只有少量 `[unknown]` | 正常；若大面积 unknown → RelWithDebInfo 重建 |
 | `pgrep` 无输出 | 确认 server 已启动；用 `pgrep -x server` |
 | SSH 卡死 | 只用 `-c20`；`free -h`；tmux |
-| 同跑 wrk RPS 与 §4 不一致 | **预期**（构建类型与 perf 开销不同） |
+| 同跑 wrk RPS 与第 4 节不一致 | **预期**（构建类型与 perf 开销不同） |
 | `stackcollapse-perf.pl` 找不到 | 安装 FlameGraph 并加入 PATH |
 
 ---
@@ -364,7 +363,7 @@ sudo perf record -F 997 --call-graph dwarf -p "$SERVER_PID" -o benchmark_log/art
 | `-p PID` | 只采 server |
 | `sleep 30` | 与 wrk `-d30s` 对齐 |
 
-**分层符号表（与脚本一致，§0～§4）：**
+**分层符号表（与脚本一致，§0～§3）：**
 
 ```bash
 bash scripts/perf_bench.sh flamegraph -v v10.0
@@ -372,7 +371,7 @@ bash scripts/perf_bench.sh flamegraph -v v10.0
 head -80 benchmark_log/artifacts/v10.0_perf_report.txt
 ```
 
-（手动 `perf report` 只得到原始 flat 表，不含 §0 预算与 §3 内核分类；日常用脚本 `flamegraph` 子命令重生。）
+（手动 `perf report` 只得到原始 flat 表，不含 §0 预算与 §2/§3 分类；日常用脚本 `flamegraph` 子命令重生。）
 
 **火焰图（需 FlameGraph）：**
 
@@ -400,7 +399,7 @@ sudo perf script -i benchmark_log/artifacts/${BASE}_perf.data | stackcollapse-pe
 
 ### 填表
 
-与「自动 perf」相同：写入该版本报告 §5；wrk 同跑 RPS **不作版本验收**。
+与「自动 perf」相同：写入该版本报告**第 5 节**；wrk 同跑 RPS **不作版本验收**。
 
 ---
 

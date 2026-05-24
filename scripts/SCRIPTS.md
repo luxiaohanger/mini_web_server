@@ -235,7 +235,7 @@ bash scripts/perf_bench.sh --stop-server -v v10.0    # run 结束后 SIGTERM 停
 - **`run` 默认可写产物**：`{版本}_wrk.txt`（除非 `--skip-wrk`）、`{版本}_perf.data`、`{版本}_perf_report.txt`、`{版本}_flamegraph.svg`。
 - **`flamegraph` 只覆盖**：`{版本}_perf_report.txt`、`{版本}_flamegraph.svg`（**不删** `perf.data`）。
 - 同版本产物已存在 → 提示 **`[y/N]`** 覆盖；确认后 **先删除将被覆盖的旧文件** 再生成。非交互：`PERF_BENCH_FORCE=1`。
-- perf 同跑 wrk 的 RPS **不作** 版本 wrk 验收（见 bench 报告 §4 vs §5）。
+- perf 同跑 wrk 的 RPS **不作** 版本 wrk 验收（见 bench 报告第 4 节 vs 第 5 节）。
 
 ---
 
@@ -267,7 +267,7 @@ BUILD_JOBS=2 bash scripts/perf_bench.sh -v v10.0
 |------|------|------|
 | `{版本}_wrk.txt` | 与 perf 同跑的 wrk 输出（仅写入文件） | 否 |
 | `{版本}_perf.data` | perf 原始采样 | 否 |
-| `{版本}_perf_report.txt` | **分层符号表**（§0～§4） | 否 |
+| `{版本}_perf_report.txt` | **分层符号表**（§0～§3） | 否 |
 | `{版本}_flamegraph.svg` | 火焰图（调用链） | 否 |
 
 **符号表生成（脚本内置，勿改口径）：**
@@ -278,15 +278,14 @@ BUILD_JOBS=2 bash scripts/perf_bench.sh -v v10.0
 |------|------|------|
 | **§0** | 按 DSO 分层统计 **Self**（互斥） | 先看 kernel / libc / server 大盘 |
 | **§1** | 筛 `server` DSO，**All / Self** | **All** 定 src 优先级 |
-| **§2** | 内核符号 **Self**（≥ 阈值） | 原始热点 |
-| **§3** | §2 符号分类 **Self**（互斥） | syscall / network / futex / sched / other |
-| **§4** | `libc.so.6` 符号 **Self** | readv/write/epoll 等 |
+| **§2** | 内核：**分类**（互斥）+ **符号**（≥ 阈值） | 摘要看分类 |
+| **§3** | libc：**分类**（互斥）+ **符号**（≥ 阈值） | 摘要看分类 |
 
 | 要点 | 说明 |
 |------|------|
 | **排序** | 必须 `comm,dso,symbol`（`dso,symbol` 会缺 DSO 列导致 §0 失效） |
-| **阈值** | `PERF_REPORT_PERCENT_LIMIT`（默认 `0.1`）过滤 §1/§2/§4 符号行；§0/§3 不过滤 |
-| **读法** | §0 → §3 → §1 → 火焰图 SVG |
+| **阈值** | `PERF_REPORT_PERCENT_LIMIT`（默认 `0.1`）过滤 §1 与 §2/§3 符号子段 |
+| **读法** | §0 → §2/§3 分类 → §1 → 火焰图 SVG |
 
 结论写入 `benchmark_log/{版本}_{YYYYMMDD}_bench.md` §5（模板见 `benchmark_log/TEMPLATE.md`）。
 
