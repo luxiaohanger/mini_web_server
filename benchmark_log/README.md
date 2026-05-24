@@ -94,8 +94,11 @@ tmux new -s bench
 **窗格 A — 启动 server：**
 
 ```bash
-./build/src/server/server > /tmp/server.log 2>&1
+./build/src/server/server > /tmp/server.log 2>&1              # v10.1+ 默认 ThreadPool off
+# v10.0 开池对照：./build/src/server/server -t on > /tmp/server.log 2>&1
 ```
+
+> server **`-t on|off`** 控制 ThreadPool（默认 off）；与 wrk **`-t`**（客户端线程数）无关。详见 [`scripts/SCRIPTS.md`](../scripts/SCRIPTS.md)。
 
 **分屏** — `Ctrl+b` 然后 `%`。
 
@@ -121,7 +124,7 @@ wrk -t1 -c10 -d5s http://127.0.0.1:8888/
 # 1. 轻量基线
 wrk -t1 -c10 -d10s http://127.0.0.1:8888/
 wrk -t1 -c20 -d10s http://127.0.0.1:8888/
-wrk -t2 -c20 -d30s http://127.0.0.1:8888/   # 主基线（v10.0 ≈ 32.8k RPS）
+wrk -t2 -c20 -d30s http://127.0.0.1:8888/   # 主基线（v10.1 off ≈ 69.6k；v10.0 on ≈ 32.8k）
 ```
 
 | 阶段 | `-t` | `-c` | `-d` | 说明 |
@@ -174,24 +177,25 @@ HTTP 功能验收用 client 代替 wrk，见 [`scripts/SCRIPTS.md`](../scripts/S
 ### 命令
 
 ```bash
-bash scripts/perf_bench.sh -v v10.0
+bash scripts/perf_bench.sh -v v10.1                    # server 默认 -t off
+bash scripts/perf_bench.sh --server-t on -v v10.0      # 复现 v10.0 开池 perf
 ```
 
 已构建且不想重编：
 
 ```bash
-bash scripts/perf_bench.sh --skip-build -v v10.0
+bash scripts/perf_bench.sh --skip-build -v v10.1
 ```
 
 其他子命令：
 
 ```bash
 bash scripts/perf_bench.sh check
-bash scripts/perf_bench.sh flamegraph -v v10.0
-bash scripts/perf_bench.sh --stop-server -v v10.0
+bash scripts/perf_bench.sh flamegraph -v v10.1
+bash scripts/perf_bench.sh --stop-server -v v10.1
 ```
 
-流程：停 server → 删 `build/` → RelWithDebInfo 重编 → 起 server → wrk+perf 并行 30s → 生成 **符号表** 与 **火焰图 SVG**。
+流程：停 server → 删 `build/` → RelWithDebInfo 重编 → 起 server（**`-t off` 默认**）→ wrk+perf 并行 30s → 生成 **符号表** 与 **火焰图 SVG**。
 
 ### 前置条件
 
@@ -337,7 +341,7 @@ free -h   # available 过低则不要开 perf+wrk
 **窗格 A：**
 
 ```bash
-./build/src/server/server > /tmp/server.log 2>&1
+./build/src/server/server > /tmp/server.log 2>&1    # 或 -t on 对照 v10.0
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8888/
 pgrep -x server
 ```
@@ -408,4 +412,5 @@ sudo perf script -i benchmark_log/artifacts/${BASE}_perf.data | stackcollapse-pe
 | 设计版本 | 文件 | 摘要 |
 |----------|------|------|
 | v9 | [v9_20260523_wrk_baseline.md](./v9_20260523_wrk_baseline.md) | KA ~29k RPS；close 未完成 |
-| v10.0 | [v10.0_20260523_bench.md](./v10.0_20260523_bench.md) | KA ~32.8k RPS；perf：enqueue+write 热点 |
+| v10.0 | [v10.0_20260523_bench.md](./v10.0_20260523_bench.md) | KA ~32.8k RPS（ThreadPool on）；perf：enqueue+write 热点 |
+| v10.1 | [v10.1_20260524_bench.md](./v10.1_20260524_bench.md) | KA ~69.6k RPS（off，+112%）；perf：读写+network，无 enqueue |

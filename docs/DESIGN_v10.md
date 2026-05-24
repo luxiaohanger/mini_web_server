@@ -15,6 +15,6 @@
 
 | 项 | 内容 |
 |----|------|
-| 背景 | v10.0 perf：CPU 主要在内核与 libc（§0 合计 ~86%）；**§1** 跨线程 enqueue/future(~25%)、TimerQueue::refreshClock(7%)、写路径 sendHttpOnLoop(~33%)；Echo 下 parse All ~4.5% |
-| 变更 | （待填：`src/` 代码优化） |
-| 结果 | （待填：描述性结论 + 链到 `benchmark_log/` 对应记录；不写测试指令） |
+| 背景 | v10.0 perf：CPU 主要在内核与 libc（§0 合计 ~86%） ；**§1** 跨线程 enqueue/future(~25%)、TimerQueue::refreshClock(7%)、写路径 sendHttpOnLoop(~33%)；Echo 下 parse All ~4.5%，ThreadPool 对 Echo 为纯开销 |
+| 变更 | **ThreadPool 可选，默认关闭（Echo I/O 直出）**。<br>• `main.cpp`：`-t on\|off` 解析，默认 **off**；非法参数 exit 1<br>• `Server(bool useThreadPool)`：`off` 不创建 `ThreadPool`；`stop()` 仅 `on` 时 `threadpool->stop()`<br>• `SubReactor(bool)`：`on` 用带 `taskSubmit` 的 `addConnection`；`off` 用无池重载<br>• `Connection(..., bool)`：`off` 在 owner I/O 线程同步 `buildResponse` → `sendHttpOnLoop`（无 `working++`）；`on` 保持 v10.0 enqueue 双跳<br>• SubReactor 数量仍 = `hardware_concurrency()`，与 `-t` 无关<br>• **对照**：复现 v10.0 行为需 `./server -t on`；v10.1 验收默认不加参或 `-t off` |
+| 结果 | KA **~69.6k RPS**（wrk，ThreadPool off，+112% vs v10.0）；延迟 **284us**。perf：**§0** kernel 66% / server 8% Self；**§1** onHttp→读写(~60%/50%)，enqueue/ThreadPool **消失**，refreshClock 11%；**§2** network 20%（↑）；**§3** io 9%（readv）/ pthread 1%（↓）。详见 [`v10.1_20260524_bench`](../benchmark_log/v10.1_20260524_bench.md) |

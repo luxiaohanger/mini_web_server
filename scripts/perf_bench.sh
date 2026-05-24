@@ -8,6 +8,8 @@ SERVER="${SERVER:-$BUILD_DIR/src/server/server}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-$ROOT/benchmark_log/artifacts}"
 FLAMEGRAPH_DIR="${FLAMEGRAPH_DIR:-$HOME/FlameGraph}"
 SERVER_LOG="${SERVER_LOG:-/tmp/server.log}"
+# 传给 server 的 -t on|off（默认 off，与 v10.1+ main 一致；复现 v10.0 开池行为用 on）
+SERVER_T="${SERVER_T:-off}"
 BUILD_JOBS="${BUILD_JOBS:-$(nproc 2>/dev/null || echo 2)}"
 
 DESIGN_VER=""
@@ -39,6 +41,7 @@ usage() {
   -v <版本>      设计版本（run/flamegraph 必填），如 v10.0
   -d <秒>        wrk 与 perf 时长（默认 30）
   -t / -c        wrk 线程数 / 连接数（默认 2 / 20）
+  --server-t on|off  传给 server 的 ThreadPool 开关（默认 off；v10.0 对照用 on）
   -u <url>       wrk URL（默认 http://127.0.0.1:8888/）
   -i <file>      perf.data 路径（flamegraph；默认 artifacts/{版本}_perf.data）
   -j <N>         cmake --build 并行数（默认 nproc）
@@ -54,6 +57,7 @@ usage() {
   ARTIFACTS_DIR              产物目录（默认 benchmark_log/artifacts）
   FLAMEGRAPH_DIR             FlameGraph 路径（默认 ~/FlameGraph）
   SERVER_LOG                 server 日志（默认 /tmp/server.log）
+  SERVER_T                   server -t on|off（默认 off；与 --server-t 等效）
   PERF_REPORT_PERCENT_LIMIT  符号表阈值 %（默认 0.1，§0 不受限）
   PERF_BENCH_FORCE=1           跳过覆盖确认
 
@@ -61,9 +65,10 @@ usage() {
 详情: scripts/SCRIPTS.md
 
 示例:
-  bash scripts/perf_bench.sh -v v10.0
-  bash scripts/perf_bench.sh --skip-build -v v10.0
-  bash scripts/perf_bench.sh flamegraph -v v10.0
+  bash scripts/perf_bench.sh -v v10.1
+  bash scripts/perf_bench.sh --skip-build -v v10.1
+  bash scripts/perf_bench.sh --server-t on -v v10.0   # 复现 v10.0 开池 perf
+  bash scripts/perf_bench.sh flamegraph -v v10.1
   bash scripts/perf_bench.sh check
 EOF
 }
@@ -179,6 +184,15 @@ verify_server_symbols() {
     fi
 }
 
+validate_server_t() {
+    case "$SERVER_T" in
+        on | off) ;;
+        *)
+            die "SERVER_T / --server-t 须为 on 或 off（当前: $SERVER_T）"
+            ;;
+    esac
+}
+
 perf_cmd() {
     if [[ "$(id -u)" -eq 0 ]]; then
         perf "$@"
@@ -235,17 +249,18 @@ wait_server_ready() {
 
 start_server() {
     local pid
+    validate_server_t
     pid="$(server_pid)"
     if [[ -n "$pid" ]]; then
-        log "server 已运行 PID=$pid"
+        log "server 已运行 PID=$pid（未按 -t $SERVER_T 重启；请先 stop_server）"
         return 0
     fi
-    log "后台启动 server → $SERVER_LOG"
-    "$SERVER" >"$SERVER_LOG" 2>&1 &
+    log "后台启动 server -t $SERVER_T → $SERVER_LOG"
+    "$SERVER" -t "$SERVER_T" >"$SERVER_LOG" 2>&1 &
     SERVER_STARTED=1
     wait_server_ready
     pid="$(server_pid)"
-    log "server PID=$pid"
+    log "server PID=$pid (threadpool=$SERVER_T)"
 }
 
 run_wrk() {
@@ -932,6 +947,10 @@ while [[ $# -gt 0 ]]; do
         --no-warmup)
             DO_WARMUP=0
             shift
+            ;;
+        --server-t)
+            SERVER_T="$2"
+            shift 2
             ;;
         --stop-server)
             STOP_SERVER=1

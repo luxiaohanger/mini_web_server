@@ -27,6 +27,21 @@ cmake --build build
 
 server 默认监听 **8888**（见 `src/server/main.cpp`）。
 
+### server 参数（v10.1+）
+
+| 选项 | 默认 | 含义 |
+|------|------|------|
+| **`-t on`** | | 启用 `ThreadPool`；Echo 组包在 worker，再 `enqueueTask` 回 owner I/O 写回（同 v10.0 行为） |
+| **`-t off`** | ✓ | 不创建 `ThreadPool`；`buildResponse` 在 SubReactor I/O 线程同步完成 |
+
+```bash
+./build/src/server/server              # 默认 -t off
+./build/src/server/server -t on        # 开池（v10.0 perf 对照）
+./build/src/server/server -t off       # 显式关池
+```
+
+> **与 wrk / client 的 `-t` 无关**：wrk `-t` 是压测客户端线程数；client `-t` 是 idle 超时验收；server `-t` 仅控制 ThreadPool。
+
 ---
 
 ## 多终端启动
@@ -42,7 +57,8 @@ tmux new -s mini_web_server
 **窗格 A（默认）— server：**
 
 ```bash
-./build/src/server/server
+./build/src/server/server              # v10.1+ 默认 ThreadPool off
+# 或复现 v10.0 开池：./build/src/server/server -t on
 # 期望输出：Server is starting!
 ```
 
@@ -71,8 +87,9 @@ wrk 压测时同样用双窗格：A 常驻 server，B 跑 wrk（见 [`benchmark_
 ### 两个终端分别启动
 
 ```bash
-# 终端 1 — server
+# 终端 1 — server（v10.1+ 默认 ThreadPool off）
 ./build/src/server/server
+# v10.0 开池对照：./build/src/server/server -t on
 
 # 终端 2 — HTTP 多轮四用例
 ./build/src/client/client -n 1
@@ -186,7 +203,8 @@ echo "exit code: $?"
 **必须** 指定设计版本 `-v`（与 `benchmark_log/{版本}_*_bench.md` 对齐）。
 
 ```bash
-bash scripts/perf_bench.sh -v v10.0          # 完整流程（默认 run）
+bash scripts/perf_bench.sh -v v10.1          # 完整流程（server 默认 -t off）
+bash scripts/perf_bench.sh --server-t on -v v10.0   # 复现 v10.0 开池 perf
 bash scripts/perf_bench.sh -h                # 脚本内简要帮助
 ```
 
@@ -218,8 +236,9 @@ bash scripts/perf_bench.sh --stop-server -v v10.0    # run 结束后 SIGTERM 停
 |------|--------|------|
 | **`-v <版本>`** | （无，**必填**） | 设计版本号，如 `v10.0`、`v10.1`；产物命名为 `{版本}_*`；格式须匹配 `vN` 或 `vN.x` |
 | **`-d <秒>`** | `30` | wrk 持续时间，与 `perf record` 采样时长一致 |
-| **`-t <N>`** | `2` | wrk 线程数（`-t2`） |
+| **`-t <N>`** | `2` | wrk 线程数（`-t2`）；**不是** server 的 ThreadPool 开关 |
 | **`-c <N>`** | `20` | wrk 连接数（`-c20`）；SSH 环境勿过大，防 OOM |
+| **`--server-t on\|off`** | `off` | 启动 server 时传入 `-t`；v10.1+ 验收默认 **off**；v10.0 对照用 **on** |
 | **`-u <url>`** | `http://127.0.0.1:8888/` | wrk 目标 URL（Keep-Alive GET） |
 | **`-i <file>`** | `artifacts/{版本}_perf.data` | **`flamegraph` 专用**：指定输入 `perf.data` 路径 |
 | **`-j <N>`** | `nproc` | `cmake --build` 并行编译线程数 |
@@ -248,15 +267,17 @@ bash scripts/perf_bench.sh --stop-server -v v10.0    # run 结束后 SIGTERM 停
 | **`ARTIFACTS_DIR`** | `benchmark_log/artifacts` | 产物输出目录 |
 | **`FLAMEGRAPH_DIR`** | `$HOME/FlameGraph` | FlameGraph 克隆路径；缺失时脚本自动 `git clone` |
 | **`SERVER_LOG`** | `/tmp/server.log` | 后台 server 日志 |
+| **`SERVER_T`** | `off` | 等同 `--server-t`；传给 server 的 `-t on\|off` |
 | **`PERF_REPORT_PERCENT_LIMIT`** | `0.1` | 符号表只保留 Overhead ≥ 该值（%）的符号 |
 | **`PERF_BENCH_FORCE`** | `0` | 设为 `1` 时跳过覆盖确认，直接删旧产物并重生 |
 
 示例：
 
 ```bash
-PERF_REPORT_PERCENT_LIMIT=0.2 bash scripts/perf_bench.sh flamegraph -v v10.0
-PERF_BENCH_FORCE=1 bash scripts/perf_bench.sh -v v10.0
-BUILD_JOBS=2 bash scripts/perf_bench.sh -v v10.0
+PERF_REPORT_PERCENT_LIMIT=0.2 bash scripts/perf_bench.sh flamegraph -v v10.1
+PERF_BENCH_FORCE=1 bash scripts/perf_bench.sh -v v10.1
+SERVER_T=on bash scripts/perf_bench.sh -v v10.0   # 开池对照
+BUILD_JOBS=2 bash scripts/perf_bench.sh -v v10.1
 ```
 
 ---
