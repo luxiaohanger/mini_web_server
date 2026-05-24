@@ -223,10 +223,10 @@ mkdir -p benchmark_log/artifacts
 |------|------|
 | `{版本}_wrk.txt` | 同跑 wrk 输出（**RPS 不作版本验收**） |
 | `{版本}_perf.data` | perf 原始数据 |
-| `{版本}_perf_report.txt` | **分层符号表**（§1 内核边界 + §2 server All/Self，≥ 0.1%） |
+| `{版本}_perf_report.txt` | **分层符号表**（§1 用户发起→内核类别 + §2 server All/Self，≥ 0.1%） |
 | `{版本}_flamegraph.svg` | **火焰图**（调用链，浏览器打开） |
 
-> 符号表：**两层** — §1 内核边界（`perf script` 取用户→内核第一个符号，不展开内核内部）+ §2 server 用户态（`perf report` inclusive，看 **All** 列排序）。
+> 符号表：**两层** — §1 按 **server 发起函数 → 内核类别**（read/write/readv/epoll/futex…）配对 + 类别合并；§2 server 用户态（`perf report` inclusive，看 **All** 列）。
 
 ### 读 perf 产物（符号表 + 火焰图）
 
@@ -234,24 +234,24 @@ mkdir -p benchmark_log/artifacts
 
 | 产物 | 回答的问题 | 怎么用 |
 |------|------------|--------|
-| **`_perf_report.txt` 符号表** | 内核花在哪些 syscall；用户态哪些函数最热 | §1 看 `__x64_sys_*` / `sys_*`；§2 按 **All** 从高到低扫 server 符号 |
+| **`_perf_report.txt` 符号表** | 哪段 server 代码触发了哪类内核调用；用户态哪些函数最热 | §1 看 **发起函数→类别** 与 **类别合并**；§2 按 **All** 排序 |
 | **`_flamegraph.svg` 火焰图** | 调用链：热点从哪条路径来、如何分叉 | 浏览器打开；Search 符号名；点宽条放大子树 |
 
 **符号表（分层）**
 
-- **§1 内核态（syscall 表）**：与火焰图 **同源栈**（`perf script` + `stackcollapse --kernel`）。按 Linux perf 阅读惯例 **负向过滤**：
-  - **跳过** syscall 跳板：`entry_SYSCALL*`、`do_syscall_64*`、`el0_svc*` 等（否则全部并成一行）；
-  - **跳过** 中断/IPI：`asm_sysvec*` 等（非应用发起的 syscall）；
-  - **跳过** 内核实现：`do_*`、`__do_sys_*`、`tcp_*`、`skb_*` 等（火焰图里也不靠这些定方向）；
-  - **保留** 首个未跳过的内核帧 → 通常为 **`__x64_sys_*` / `sys_*`**，即程序员可读的 syscall 名。
-  - 栈过浅无法解析时可能出现 `[unresolved-kernel-stack]`（**仅含内核帧**且仍无法归因）；**纯用户态样本不占 §1 行**。细节看火焰图。
+- **§1 内核态（用户发起 → 类别）**：与火焰图 **同源栈**（`perf script` + `stackcollapse --kernel`）。对每条样本栈：
+  - 找最靠 syscall 的 **server 发起帧**（如 `Buffer::sckToBuffer`、`EventLoop::readCallback`）；
+  - 将 **`__x64_sys_*`** 归入 **read / write / readv / epoll / futex / accept …**；
+  - **明细表**：`Overhead  Category  Initiator`；**合并表**：同类 syscall 加总。
+  - **read** 含 eventfd、timerfd（靠发起函数区分）；**write** 含 socket 写与 eventfd 唤醒；**futex** 含 mutex/cv。
+  - 脚注：**纯用户态**、**未配对** 占比；分母均为全部 perf 样本。
 - **§2 用户态 (server)**：`perf report --sort comm,dso,symbol -g none` **全量 inclusive** 后筛 `Shared Object=server`（**不用** `--dsos=server`，避免 All 不含内核路径）。
 - **§2 表头**：报告内精简为 **`All / Self / Symbol` 三列**（脚本去掉 perf IPC 宽表与点线分隔）；perf 原始列名 Children 归一为 All。
 - **All 与 Self**（§2，分母均为 **全部 perf 样本**）：
   - **All**：栈上 **经过** 该 server 函数及其 **全部 callees**（含 **libc、内核 syscall 路径**）的样本占比；定优化优先级 **看此列**
   - **Self**：PC **仅落在该 server 函数体内** 的样本占比（**不含**子函数与内核）；判断热点在自身还是下游
   - **勿** 将同一行的 Self + All 相加；**勿** 将表中各行百分比相加（父子行重叠计数）
-- **读法**：§1 判断 syscall/内核入口占比；§2 定 src 优化优先级；`invoke`/`lambda` 多为 `std::function` 间接调用。
+- **读法**：§1 看哪段代码触发 read/write/epoll；§2 定 src 优化优先级；`invoke`/`lambda` 多为 `std::function` 间接调用。
 - **`PERF_REPORT_PERCENT_LIMIT`** 可调阈值（默认 `0.1`）；完整调用链见火焰图。
 
 **火焰图**
@@ -263,7 +263,7 @@ mkdir -p benchmark_log/artifacts
 
 **推荐流程（定方向 → 落方案）**
 
-1. 符号表：§1 内核边界（syscall 入口占比）→ §2 server 按 **All** 排序。
+1. 符号表：§1 **发起函数→类别** 与类别合并 → §2 server 按 **All** 排序。
 2. 火焰图：对 §2 前几名 Search，确认从 `EventLoop::loop` 等根上的调用分支。
 3. 将结论写入该版本报告 §5.4「热点摘要」；§5.5 可粘贴符号表前几行或火焰图关键路径文字。
 4. wrk RPS 仍以报告 §4 为准；perf 只说明 CPU 花在哪，不代替版本验收。

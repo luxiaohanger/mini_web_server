@@ -57,7 +57,7 @@ usage() {
   PERF_REPORT_PERCENT_LIMIT  符号表阈值 %（默认 0.1）
   PERF_BENCH_FORCE=1           跳过覆盖确认
 
-符号表: 分层（§1 内核边界 + §2 server All/Self）；调用链见 SVG。
+符号表: 分层（§1 用户发起→内核类别 + §2 server All/Self）；调用链见 SVG。
 详情: scripts/SCRIPTS.md
 
 示例:
@@ -440,7 +440,7 @@ run_perf_report_flat() {
     return 0
 }
 
-append_kernel_boundary_table() {
+append_kernel_initiator_table() {
     local data="$1" limit="$2" report="$3"
     local tmp folded sc_err
     ensure_flamegraph
@@ -450,67 +450,23 @@ append_kernel_boundary_table() {
 
     if ! perf_script_with_stacks "$data" "$tmp"; then
         rm -f "$tmp" "$folded" "$sc_err"
-        die "perf script (内核边界) 失败"
+        die "perf script (§1 用户→内核) 失败"
     fi
 
     if ! stackcollapse-perf.pl --kernel <"$tmp" >"$folded" 2>"$sc_err"; then
         warn "stackcollapse-perf.pl stderr: $(head -5 "$sc_err" 2>/dev/null || true)"
         rm -f "$tmp" "$folded" "$sc_err"
-        die "stackcollapse-perf.pl (内核边界) 失败"
+        die "stackcollapse-perf.pl (§1) 失败"
     fi
     rm -f "$sc_err" "$tmp"
 
-    # §1：Linux perf 惯例 — 负向跳过「跳板 / 中断 / 内核实现」，保留程序员可读的 syscall 层
-    # 栈序与 stackcollapse 一致：左=root caller，右=leaf；扫描 _[k] 自左向右
+    # §1：每条样本栈 — 找最靠 syscall 的 server 发起帧 + syscall 类别（read/write/epoll/futex…）
+    # 栈序与火焰图一致：左=root caller，右=leaf（采样点）
     awk -v limit="$limit" '
-    function strip_k_suffix(name) {
+    function strip_frame(name) {
         sub(/_\[k\]$/, "", name)
         sub(/_\[k\]\+0x[0-9a-fA-F]+$/, "", name)
         return name
-    }
-    # syscall 进入跳板（x86_64 / arm64 等，非具体 syscall 名）
-    function skip_syscall_trampoline(sym) {
-        if (sym ~ /^entry_SYSCALL/) return 1
-        if (sym ~ /^do_syscall_64/) return 1
-        if (sym ~ /^do_syscall$/) return 1
-        if (sym ~ /^do_emulate_amd/) return 1
-        if (sym ~ /^syscall_enter_from_user_mode/) return 1
-        if (sym ~ /^syscall_return/) return 1
-        if (sym ~ /^syscall_exit_to_user_mode/) return 1
-        if (sym ~ /^x64_sys_call/) return 1
-        if (sym ~ /^xen_hypercall/) return 1
-        if (sym ~ /^el0t_64_sync/) return 1
-        if (sym ~ /^el0_svc/) return 1
-        if (sym ~ /^el0_interrupt/) return 1
-        if (sym ~ /^invoke_syscall/) return 1
-        return 0
-    }
-    # 中断 / IPI 向量（非应用 syscall 路径）
-    function skip_interrupt_context(sym) {
-        if (sym ~ /^asm_sysvec/) return 1
-        if (sym ~ /^sysvec_/) return 1
-        if (sym ~ /^irq_[A-Za-z]/) return 1
-        if (sym ~ /^irqentry_/) return 1
-        if (sym ~ /^__irq/) return 1
-        if (sym ~ /reschedule_ipi/) return 1
-        if (sym ~ /exit_to_user_mode/) return 1
-        return 0
-    }
-    #  syscall 包装层之下的内核实现（火焰图/perf 阅读时不展开）
-    function skip_kernel_implementation(sym) {
-        if (sym ~ /^__do_sys_/ || sym ~ /^__do_compat_sys_/) return 1
-        if (sym ~ /^do_[a-z]/) return 1
-        if (sym ~ /^__tcp_/ || sym ~ /^tcp_/) return 1
-        if (sym ~ /^__udp_/ || sym ~ /^udp_/) return 1
-        if (sym ~ /^__ip_[a-z]/ || sym ~ /^ip_[a-z]/) return 1
-        if (sym ~ /^__sk_[a-z]/ || sym ~ /^skb_/ || sym ~ /^sock_[a-z]/) return 1
-        if (sym ~ /^__nf_/) return 1
-        return 0
-    }
-    function skip_for_syscall_table(sym) {
-        return (skip_syscall_trampoline(sym) \
-            || skip_interrupt_context(sym) \
-            || skip_kernel_implementation(sym))
     }
     function stack_has_kernel(frames, n,    i) {
         for (i = 1; i <= n; i++) {
@@ -520,30 +476,123 @@ append_kernel_boundary_table() {
         }
         return 0
     }
-    function pick_fallback_kernel_sym(frames, n,    i, sym) {
-        # 栈上无 __x64_sys_*（展开不足）时：仅跳过跳板/中断，保留 __do_sys_* 等
+    function is_syscall_entry(sym) {
+        return (sym ~ /^__x64_sys_/ || sym ~ /^__arm64_sys_/ || sym ~ /^__se_sys_/ \
+            || sym ~ /^__do_sys_/ || sym ~ /^__do_compat_sys_/)
+    }
+    function is_server_frame(sym) {
+        if (sym ~ /_\[k\]$/) {
+            return 0
+        }
+        if (sym ~ /^__GI_/ || sym ~ /^__libc_/ || sym ~ /^pthread_/ || sym ~ /^std::/) {
+            return 0
+        }
+        if (sym ~ /^read$|^write$|^readv$|^writev$|^close$|^ioctl$/) {
+            return 0
+        }
+        if (sym ~ /::/) {
+            return 1
+        }
+        if (sym ~ /^(Connection|EventLoop|Buffer|Epoll|TimerQueue|ThreadPool|Socket|Channel|HttpProcess|Acceptor|MainReactor|SubReactor|Server|Timer)/) {
+            return 1
+        }
+        return 0
+    }
+    function find_syscall(frames, n,    i, sym) {
         for (i = 1; i <= n; i++) {
             if (frames[i] !~ /_\[k\]$/) {
                 continue
             }
-            sym = strip_k_suffix(frames[i])
-            if (!skip_syscall_trampoline(sym) && !skip_interrupt_context(sym)) {
+            sym = strip_frame(frames[i])
+            if (is_syscall_entry(sym)) {
+                return sym SUBSEP i
+            }
+        }
+        for (i = n; i >= 1; i--) {
+            if (frames[i] !~ /_\[k\]$/) {
+                continue
+            }
+            sym = strip_frame(frames[i])
+            if (is_syscall_entry(sym)) {
+                return sym SUBSEP i
+            }
+        }
+        return SUBSEP 0
+    }
+    function find_initiator(frames, sc_idx,    j, sym) {
+        for (j = sc_idx - 1; j >= 1; j--) {
+            sym = strip_frame(frames[j])
+            if (is_server_frame(sym)) {
                 return sym
             }
         }
         return ""
     }
-    function pick_readable_kernel_sym(frames, n,    i, sym) {
-        for (i = 1; i <= n; i++) {
-            if (frames[i] !~ /_\[k\]$/) {
-                continue
-            }
-            sym = strip_k_suffix(frames[i])
-            if (!skip_for_syscall_table(sym)) {
-                return sym
+    function syscall_category(sc_sym,    s) {
+        s = sc_sym
+        sub(/^__x64_sys_/, "", s)
+        sub(/^__arm64_sys_/, "", s)
+        sub(/^__se_sys_/, "", s)
+        sub(/^__do_sys_/, "", s)
+        sub(/^__do_compat_sys_/, "", s)
+        if (s ~ /^readv/) {
+            return "readv"
+        }
+        if (s ~ /^read$/) {
+            return "read"
+        }
+        if (s ~ /^write$|^pwrite/) {
+            return "write"
+        }
+        if (s ~ /^epoll_wait|^epoll_pwait/) {
+            return "epoll"
+        }
+        if (s ~ /^futex/) {
+            return "futex"
+        }
+        if (s ~ /^accept4?$/) {
+            return "accept"
+        }
+        if (s ~ /^sendmsg|^sendto|^send/) {
+            return "send"
+        }
+        if (s ~ /^recvmsg|^recvfrom|^recv/) {
+            return "recv"
+        }
+        if (s ~ /^ppoll|^poll/) {
+            return "poll"
+        }
+        if (s ~ /^ioctl/) {
+            return "ioctl"
+        }
+        if (s ~ /^clock_gettime/) {
+            return "clock"
+        }
+        if (s ~ /^close/) {
+            return "close"
+        }
+        if (s ~ /^setsockopt|^getsockopt/) {
+            return "sockopt"
+        }
+        return s
+    }
+    function find_user_sync(frames, n, sc_idx,    j, sym) {
+        for (j = (sc_idx > 0 ? sc_idx - 1 : n); j >= 1; j--) {
+            sym = strip_frame(frames[j])
+            if (sym ~ /^pthread_mutex|^pthread_cond|^__lll_lock|^__pthread_mutex/) {
+                return "futex"
             }
         }
         return ""
+    }
+    function sort_order(pct, order, nout,    i, j, t) {
+        for (i = 1; i <= nout; i++) {
+            for (j = i + 1; j <= nout; j++) {
+                if (pct[order[j]] > pct[order[i]]) {
+                    t = order[i]; order[i] = order[j]; order[j] = t
+                }
+            }
+        }
     }
     {
         wt = $2 + 0
@@ -553,52 +602,79 @@ append_kernel_boundary_table() {
         total_samples += wt
         n = split($1, frames, ";")
         if (!stack_has_kernel(frames, n)) {
+            pure_user += wt
             next
         }
-        sym = pick_readable_kernel_sym(frames, n)
-        if (sym == "") {
-            sym = pick_fallback_kernel_sym(frames, n)
-        }
-        if (sym != "") {
-            count[sym] += wt
+        sc_pair = find_syscall(frames, n)
+        split(sc_pair, sc_parts, SUBSEP)
+        sc_sym = sc_parts[1]
+        sc_idx = sc_parts[2] + 0
+        category = ""
+        if (sc_sym != "") {
+            category = syscall_category(sc_sym)
         } else {
-            unclassified += wt
+            category = find_user_sync(frames, n, sc_idx)
         }
+        if (category == "") {
+            unpaired_kernel += wt
+            next
+        }
+        initiator = find_initiator(frames, sc_idx)
+        if (initiator == "") {
+            initiator = "[no-server-frame]"
+        }
+        detail_key = initiator SUBSEP category
+        detail_wt[detail_key] += wt
+        cat_wt[category] += wt
     }
     END {
         if (total_samples == 0) {
             print "# (无调用栈样本；检查 perf.data 是否含 call-graph)"
             exit
         }
-        printf "# Overhead  Symbol\n"
-        if (unclassified + 0 > 0) {
-            pct_u = unclassified * 100.0 / total_samples
-            if (pct_u + 0 >= limit + 0) {
-                printf " %7.2f%%  [unresolved-kernel-stack]\n", pct_u
+        printf "# Overhead  Category  Initiator (server)\n"
+        nd = 0
+        for (k in detail_wt) {
+            split(k, parts, SUBSEP)
+            pct_d[k] = detail_wt[k] * 100.0 / total_samples
+            if (pct_d[k] + 0 >= limit + 0) {
+                detail_cat[k] = parts[2]
+                detail_init[k] = parts[1]
+                order_d[++nd] = k
             }
         }
-        nout = 0
-        for (sym in count) {
-            pct[sym] = count[sym] * 100.0 / total_samples
-            if (pct[sym] + 0 >= limit + 0) {
-                order[++nout] = sym
+        sort_order(pct_d, order_d, nd)
+        if (nd == 0) {
+            print "# (无达到阈值的 发起函数→类别 配对；见下方汇总与脚注)"
+        } else {
+            for (i = 1; i <= nd; i++) {
+                k = order_d[i]
+                printf " %7.2f%%  %-8s  %s\n", pct_d[k], detail_cat[k], detail_init[k]
             }
         }
-        if (nout == 0 && unclassified == 0) {
-            print "# (未解析到可读内核符号；检查 call-graph 或见火焰图 kernel 子树)"
-            exit
-        }
-        for (i = 1; i < nout; i++) {
-            for (j = i + 1; j <= nout; j++) {
-                if (pct[order[j]] > pct[order[i]]) {
-                    t = order[i]; order[i] = order[j]; order[j] = t
-                }
+        printf "#\n# --- 按类别合并（read / write / epoll / futex …）---\n"
+        printf "# Overhead  Category\n"
+        nc = 0
+        for (c in cat_wt) {
+            pct_c[c] = cat_wt[c] * 100.0 / total_samples
+            if (pct_c[c] + 0 >= limit + 0) {
+                order_c[++nc] = c
             }
         }
-        for (i = 1; i <= nout; i++) {
-            sym = order[i]
-            printf " %7.2f%%  %s\n", pct[sym], sym
+        sort_order(pct_c, order_c, nc)
+        for (i = 1; i <= nc; i++) {
+            c = order_c[i]
+            printf " %7.2f%%  %s\n", pct_c[c], c
         }
+        printf "#\n"
+        if (pure_user + 0 > 0) {
+            printf "# 纯用户态（栈无内核帧）: %.2f%%\n", pure_user * 100.0 / total_samples
+        }
+        if (unpaired_kernel + 0 > 0) {
+            printf "# 未配对（有内核帧但无 syscall/同步类别）: %.2f%%\n", \
+                unpaired_kernel * 100.0 / total_samples
+        }
+        printf "# 说明: read 含 eventfd/timerfd 的 read(2)；write 含 socket 写与 eventfd 唤醒；futex 含 mutex/cv\n"
     }
     ' "$folded" >>"$report"
     rm -f "$folded"
@@ -626,28 +702,28 @@ generate_report() {
     base="$(artifact_base)"
     report="$ARTIFACTS_DIR/${base}_perf_report.txt"
     limit="$PERF_REPORT_PERCENT_LIMIT"
-    log "perf 符号表 → $report（分层：内核边界 + server 用户态，≥ ${limit}%）"
+    log "perf 符号表 → $report（分层：§1 用户→内核类别 + §2 server，≥ ${limit}%）"
     {
         printf '# mini_web_server perf 符号表（分层摘要）\n'
         printf '# 版本: %s\n' "$base"
         printf '#\n'
         printf '# 结构:\n'
-        printf '#   §1 内核态 — Linux perf 惯例：可读 syscall 层（非内核实现细节）\n'
-        printf '#            负向跳过：entry_SYSCALL/do_syscall_64 跳板、asm_sysvec 中断、do_/tcp_/skb_ 等\n'
-        printf '#            纯用户态样本不计入 §1 行；无法解析时见 [unresolved-kernel-stack]\n'
+        printf '#   §1 内核态 — 按 server 发起函数 → 类别（read/write/readv/epoll/futex…）配对统计\n'
+        printf '#            同火焰图栈（perf script + stackcollapse --kernel）；分母=全部 perf 样本\n'
+        printf '#            明细表 + 「按类别合并」；纯用户态/未配对见 §1 脚注\n'
         printf '#   §2 用户态 (server) — 本程序符号，含 All + Self\n'
         printf '#\n'
-        printf '# §1 口径: Overhead = 该边界符号样本数 / 全部 perf 样本数\n'
+        printf '# §1 口径: Overhead = 该配对样本数 / 全部 perf 样本数（每样本只归一条发起→类别）\n'
         printf '# §2 口径: 全量 inclusive 后筛 server 行（不用 --dsos）；All/Overhead 分母为全部样本\n'
         printf '#   All  = 含子函数 + 内核/ libc 路径的总占比（排序依据；perf 原始列名 Children）\n'
         printf '#   Self = 仅 PC 落在该函数 server 体内（参考）；勿把 Self+All 相加\n'
         printf '# 过滤: >= %s%%  |  -g none（§2 无 |--- 调用树）\n' "$limit"
         printf '# 调用链: %s_flamegraph.svg\n' "$base"
         printf '# 原始: %s\n#\n' "$(basename "$data")"
-        printf '# === §1 内核态（用户→内核边界） ===\n'
-        printf '# 方法: perf script + stackcollapse --kernel；负向过滤后取首个可读内核帧（见上）\n#\n'
+        printf '# === §1 内核态（用户发起函数 → 类别） ===\n'
+        printf '# 方法: 栈上最靠 syscall 的 server 帧 + __x64_sys_* 归类；read 含 eventfd/timerfd\n#\n'
     } >"$report"
-    append_kernel_boundary_table "$data" "$limit" "$report"
+    append_kernel_initiator_table "$data" "$limit" "$report"
     {
         printf '\n# === §2 用户态明细 (Shared Object: server) ===\n'
         printf '# 命令: perf report --sort comm,dso,symbol --percent-limit %s -g none（筛 Shared Object=%s）\n#\n' \
@@ -752,7 +828,7 @@ cmd_run() {
     log "完成 → $ARTIFACTS_DIR"
     log "  wrk:        ${base}_wrk.txt"
     log "  perf.data:  ${base}_perf.data"
-    log "  report:     ${base}_perf_report.txt（§1 内核边界 + §2 server，≥${PERF_REPORT_PERCENT_LIMIT}%）"
+    log "  report:     ${base}_perf_report.txt（§1 用户→内核 + §2 server，≥${PERF_REPORT_PERCENT_LIMIT}%）"
     log "  flamegraph: ${base}_flamegraph.svg（调用链）"
     log "请更新或新建 benchmark_log/${DESIGN_VER}_YYYYMMDD_bench.md（wrk + perf 同一份）"
 
