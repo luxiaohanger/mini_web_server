@@ -288,20 +288,20 @@ generate_flamegraph() {
 }
 
 # 判断 perf report 是否为 flat 符号表（非调用树）
+# 部分 perf 版本表头为 Overhead；部分为 Children/Self（均为 flat 一行一符号，非树）
 is_flat_symbol_report() {
     local file="$1"
     [[ -f "$file" ]] || return 1
-    # 调用树特征：Children/Self 表头，或 |--xx%-- 分支行
-    if grep -qE '^# Children[[:space:]]+Self' "$file"; then
-        return 1
-    fi
     if grep -qE '^[[:space:]]+\|--' "$file"; then
         return 1
     fi
-    if ! grep -qE '^# Overhead[[:space:]]' "$file"; then
-        return 1
+    if grep -qE '^# Overhead[[:space:]]' "$file"; then
+        return 0
     fi
-    return 0
+    if grep -qE '^# Children[[:space:]]+Self' "$file"; then
+        return 0
+    fi
+    return 1
 }
 
 # 写入 flat inclusive 符号表（Overhead 含子函数；无调用树）
@@ -323,7 +323,7 @@ write_flat_symbol_report() {
         warn "perf report 前几行:"
         head -25 "$tmp" >&2 || true
         rm -f "$tmp"
-        die "perf report 未生成 flat 符号表（出现调用树或表头异常）。请执行: perf report -i <data> --stdio --sort comm,dso,symbol --percent-limit ${limit} -g none"
+        die "perf report 未生成 flat 符号表（出现 |--- 调用树或表头无法识别）。请执行: perf report -i <data> --stdio --sort comm,dso,symbol --percent-limit ${limit} -g none"
     fi
     mv "$tmp" "$dest"
 }
@@ -338,11 +338,12 @@ generate_report() {
     {
         printf '# mini_web_server perf 符号表\n'
         printf '# 版本: %s\n' "$base"
-        printf '# 口径: inclusive — Overhead 含该符号及其调用的子函数（未使用 --no-children）\n'
-        printf '# 过滤: Overhead >= %s%%（--percent-limit %s -g none）\n' "$limit" "$limit"
+        printf '# 口径: inclusive — 含子函数（未使用 --no-children）\n'
+        printf '# 表头: Overhead 列，或 Children 列（均为 inclusive）；Self 列仅为函数自身\n'
+        printf '# 阅读: 按 inclusive 占比降序；看 Children 或 Overhead，勿只看 Self\n'
+        printf '#       Shared Object=server 为用户态；[k] 为内核\n'
+        printf '# 过滤: >= %s%%（--percent-limit %s -g none）\n' "$limit" "$limit"
         printf '# 命令: perf report --stdio --sort comm,dso,symbol --percent-limit %s -g none\n' "$limit"
-        printf '# 阅读: 按 Overhead 降序；同一采样可计入多行，各行不必相加为 100%%\n'
-        printf '#       Shared Object=server 为用户态；[k]/[kernel.kallsyms] 为内核\n'
         printf '# 调用链: 见 %s_flamegraph.svg\n' "$base"
         printf '# 原始: %s\n#\n' "$(basename "$data")"
     } >"$report"

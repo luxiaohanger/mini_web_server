@@ -278,8 +278,8 @@ perf report -i <perf.data> --stdio --sort comm,dso,symbol --percent-limit 0.1 -g
 
 | 要点 | 说明 |
 |------|------|
-| **inclusive** | **不用** `--no-children` → Overhead **含子函数/子调用** |
-| **flat** | **`-g none`** → 一行一符号，**无** `\|---` 调用树 |
+| **inclusive** | **不用** `--no-children`；表头为 **Overhead** 或 **Children** 列（均含子函数） |
+| **flat** | **`-g none`** → 一行一符号；**无** `\|---` 树；若有 `\|---` 才是异常 |
 | **读法** | `head -40` 看热点；用户态看 `Shared Object=server`；调用链看 SVG |
 
 结论写入 `benchmark_log/{版本}_{YYYYMMDD}_bench.md` §5（模板见 `benchmark_log/TEMPLATE.md`）。

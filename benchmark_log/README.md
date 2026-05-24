@@ -226,7 +226,7 @@ mkdir -p benchmark_log/artifacts
 | `{版本}_perf_report.txt` | **inclusive 符号表**（flat，Overhead 含子函数，≥ 0.1%） |
 | `{版本}_flamegraph.svg` | **火焰图**（调用链，浏览器打开） |
 
-> 符号表：**一种格式** — `perf report --stdio --sort comm,dso,symbol --percent-limit 0.1 -g none`（inclusive，无 `--no-children`）。表头为 `Overhead / Command / Shared Object / Symbol`。
+> 符号表：**一种格式** — `perf report --stdio --sort comm,dso,symbol --percent-limit 0.1 -g none`（inclusive，无 `--no-children`）。表头可能是 `Overhead / ...` 或 **`Children / Self / ...`**（均为 flat 一行一符号；**看 Children 列** = inclusive）。
 
 ### 读 perf 产物（符号表 + 火焰图）
 
@@ -239,7 +239,10 @@ mkdir -p benchmark_log/artifacts
 
 **符号表（inclusive）**
 
-- **一条命令、一种口径**：`--sort comm,dso,symbol --percent-limit 0.1 -g none`（**`-g none`** = 不展开调用树；**不用** `--no-children` → Overhead **含子函数**）。
+- **一条命令、一种口径**：`--sort comm,dso,symbol --percent-limit 0.1 -g none`（**`-g none`** = 不展开 `|---` 调用树；**不用** `--no-children`）。
+- **表头两种（均合法）**：
+  - `Overhead / Command / ...` → 看 **Overhead** 列（inclusive）
+  - `Children / Self / Command / ...` → 看 **Children** 列（inclusive）；**Self** 仅为函数自身，勿当主排序依据
 - **注意**：父符号与子符号可能 **同时各占一行**，各行 **不必相加为 100%**。
 - **列含义**：`Shared Object=server` 为本程序用户态；`[kernel.kallsyms]` / `[k]` 为内核。
 - **读法**：`head -40` 看全局热点；定 src 优先级时 **重点看 `Shared Object=server` 的行**；`invoke`/`lambda` 多为 `std::function` 间接调用。
@@ -283,7 +286,8 @@ mkdir -p benchmark_log/artifacts
 | 现象 | 处理 |
 |------|------|
 | `Permission denied` | `sudo perf record` |
-| 符号表上万行、含 `\|---` 或 `Children/Self` | report 生成异常；`git pull` 后 `bash scripts/perf_bench.sh flamegraph -v <版本>` |
+| 符号表上万行、含 `\|---` 分支 | 调用树异常；`git pull` 后 `flamegraph -v` 重生 |
+| 表头为 `Children/Self` 但无 `\|---` | **正常** flat；按 **Children** 列读 inclusive |
 | 符号表只有少量 `[unknown]` | 正常；若大面积 unknown → RelWithDebInfo 重建 |
 | `pgrep` 无输出 | 确认 server 已启动；用 `pgrep -x server` |
 | SSH 卡死 | 只用 `-c20`；`free -h`；tmux |
