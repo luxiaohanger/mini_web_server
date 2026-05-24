@@ -17,6 +17,7 @@ WRK_CONNECTIONS=20
 WRK_URL="http://127.0.0.1:8888/"
 PERF_FREQ=997
 CALL_GRAPH="dwarf"
+PERF_REPORT_PERCENT_LIMIT="${PERF_REPORT_PERCENT_LIMIT:-0.1}"
 DO_WARMUP=1
 DO_REBUILD=1
 STOP_SERVER=0
@@ -59,9 +60,10 @@ usage() {
 
 说明:
   - 一设计版本一份产物：benchmark_log/artifacts/{版本}_wrk.txt 等
+  - 产物已存在时将提示 [y/N] 确认覆盖（非交互可设 PERF_BENCH_FORCE=1）
   - 记录文档: benchmark_log/{版本}_{YYYYMMDD}_bench.md（按 TEMPLATE 填写 wrk + perf）
 
-环境变量: BUILD_DIR, BUILD_JOBS, FLAMEGRAPH_DIR, ARTIFACTS_DIR, SERVER_LOG
+环境变量: BUILD_DIR, BUILD_JOBS, FLAMEGRAPH_DIR, ARTIFACTS_DIR, SERVER_LOG, PERF_REPORT_PERCENT_LIMIT, PERF_BENCH_FORCE
 EOF
 }
 
@@ -80,6 +82,55 @@ require_design_version() {
 
 artifact_base() {
     echo "$DESIGN_VER"
+}
+
+# 列出本命令即将写入的产物路径（每行一个）
+artifact_output_paths() {
+    local mode="$1"
+    local base
+    base="$(artifact_base)"
+    if [[ "$mode" == "flamegraph" ]]; then
+        echo "$ARTIFACTS_DIR/${base}_perf_report.txt"
+        echo "$ARTIFACTS_DIR/${base}_flamegraph.svg"
+        return
+    fi
+    echo "$ARTIFACTS_DIR/${base}_perf.data"
+    echo "$ARTIFACTS_DIR/${base}_perf_report.txt"
+    echo "$ARTIFACTS_DIR/${base}_flamegraph.svg"
+    if [[ "$SKIP_WRK" -eq 0 ]]; then
+        echo "$ARTIFACTS_DIR/${base}_wrk.txt"
+    fi
+}
+
+confirm_overwrite_if_needed() {
+    local mode="$1"
+    local existing=() p ans
+    while IFS= read -r p; do
+        [[ -f "$p" ]] && existing+=("$p")
+    done < <(artifact_output_paths "$mode")
+
+    [[ ${#existing[@]} -eq 0 ]] && return 0
+
+    if [[ "${PERF_BENCH_FORCE:-0}" == "1" ]]; then
+        warn "PERF_BENCH_FORCE=1，将覆盖 ${#existing[@]} 个已有产物"
+        return 0
+    fi
+
+    log "以下产物已存在:"
+    for p in "${existing[@]}"; do
+        printf '  %s\n' "$p"
+    done
+
+    while true; do
+        if ! read -r -p '[perf_bench] 覆盖? [y/N] ' ans; then
+            die "已取消（非交互环境请删除产物或设 PERF_BENCH_FORCE=1）"
+        fi
+        case "$ans" in
+            y | Y) return 0 ;;
+            n | N | "") die "已取消" ;;
+            *) warn "请输入 y 或 n" ;;
+        esac
+    done
 }
 
 ensure_flamegraph() {
@@ -225,11 +276,19 @@ generate_flamegraph() {
 
 generate_report() {
     local data="$1"
-    local base report
+    local base report limit
     base="$(artifact_base)"
     report="$ARTIFACTS_DIR/${base}_perf_report.txt"
-    log "perf 符号表 → $report"
-    perf_cmd report -i "$data" --stdio --sort symbol --percent-limit 0 >"$report"
+    limit="$PERF_REPORT_PERCENT_LIMIT"
+    log "perf 符号表 → $report（Overhead ≥ ${limit}%）"
+    {
+        printf '# mini_web_server perf 符号表\n'
+        printf '# 版本: %s\n' "$base"
+        printf '# 过滤: Overhead >= %s%%（--percent-limit %s）\n' "$limit" "$limit"
+        printf '# 用途: 按 %% 从高到低找 CPU 瓶颈；调用链见 %s_flamegraph.svg\n' "$base"
+        printf '# 原始: %s\n#\n' "$(basename "$data")"
+        perf_cmd report -i "$data" --stdio --sort symbol --percent-limit "$limit"
+    } >"$report"
     log "符号表: $report ($(wc -l <"$report" | tr -d ' ') 行)"
 }
 
@@ -266,8 +325,9 @@ cmd_flamegraph() {
             die "未找到 perf.data: $ARTIFACTS_DIR/${base}_perf.data"
         fi
     fi
-    log "使用 perf.data: $data"
     mkdir -p "$ARTIFACTS_DIR"
+    confirm_overwrite_if_needed flamegraph
+    log "使用 perf.data: $data"
     generate_flamegraph "$data"
     generate_report "$data"
 }
@@ -286,6 +346,7 @@ cmd_run() {
     ensure_flamegraph
     check_memory
     mkdir -p "$ARTIFACTS_DIR"
+    confirm_overwrite_if_needed run
 
     if [[ "$DO_REBUILD" -eq 1 ]]; then
         rebuild_for_perf
@@ -325,7 +386,7 @@ cmd_run() {
     log "完成 → $ARTIFACTS_DIR"
     log "  wrk:        ${base}_wrk.txt"
     log "  perf.data:  ${base}_perf.data"
-    log "  report:     ${base}_perf_report.txt（完整符号表）"
+    log "  report:     ${base}_perf_report.txt（热点符号表，≥${PERF_REPORT_PERCENT_LIMIT}%）"
     log "  flamegraph: ${base}_flamegraph.svg（调用链）"
     log "请更新或新建 benchmark_log/${DESIGN_VER}_YYYYMMDD_bench.md（wrk + perf 同一份）"
 

@@ -223,8 +223,10 @@ mkdir -p benchmark_log/artifacts
 |------|------|
 | `{版本}_wrk.txt` | 同跑 wrk 输出（**RPS 不作版本验收**） |
 | `{版本}_perf.data` | perf 原始数据 |
-| `{版本}_perf_report.txt` | **完整符号表**（flat，按 Overhead 降序） |
+| `{版本}_perf_report.txt` | **热点符号表**（Overhead ≥ 0.1%，按占比降序，可读体量） |
 | `{版本}_flamegraph.svg` | **火焰图**（调用链，浏览器打开） |
+
+> 符号表默认省略 0.1% 以下符号，避免数十 MB 全量 listing；瓶颈分析足够。需更细粒度时可对同目录 `perf.data` 手动调 `--percent-limit`，或看火焰图。
 
 ### 读 perf 产物（符号表 + 火焰图）
 
@@ -237,9 +239,11 @@ mkdir -p benchmark_log/artifacts
 
 **符号表**
 
-- 每一行一个符号（函数名）；`Overhead` = 该符号占 **全部 CPU 采样** 的比例（同一份样本可出现在多行，各行 **不必相加为 100%**）。
+- 脚本默认 **`--percent-limit 0.1`**：只保留 Overhead ≥ 0.1% 的符号，通常 **数百行、几百 KB～1MB**，便于 `head` / `less` 阅读。
+- 每一行一个符号；`Overhead` = 该符号占 **全部 CPU 采样** 的比例（各行 **不必相加为 100%**）。
 - 默认 **含子函数（inclusive）**：父符号的 % 包含其调用的函数。
 - `[k]` / `[kernel.kallsyms]` 为内核；无标记的 `Connection::` 等为用户态；`[unknown]` 表示缺符号，需 RelWithDebInfo 重编。
+- 环境变量 **`PERF_REPORT_PERCENT_LIMIT`** 可改阈值（如 `0.05`）；原始 **`perf.data`** 始终保留，可事后重算。
 
 **火焰图**
 
@@ -250,7 +254,7 @@ mkdir -p benchmark_log/artifacts
 
 **推荐流程（定方向 → 落方案）**
 
-1. 符号表：列出 Overhead ≥ 约 1%～2% 的符号，区分用户态 / 内核 / 锁 / 网络。
+1. 符号表：看文件头说明后，从 Overhead 最高几行开始（通常前几名即瓶颈），区分用户态 / 内核 / 锁 / 网络。
 2. 火焰图：对表内前几名 Search，确认从 `EventLoop::loop` 等根上的调用分支。
 3. 将结论写入该版本报告 §5.4「热点摘要」；§5.5 可粘贴符号表前几行或火焰图关键路径文字。
 4. wrk RPS 仍以报告 §4 为准；perf 只说明 CPU 花在哪，不代替版本验收。
@@ -265,6 +269,8 @@ mkdir -p benchmark_log/artifacts
 | **不是** | 再验 wrk RPS；同跑 wrk 仅保证采样期间有负载 |
 
 脚本内 wrk 参数：`wrk -t2 -c20 -d30s`（Keep-Alive）。**不要**把 `{版本}_wrk.txt` 里的 RPS 与「手动 wrk」§4 对比。
+
+同版本产物已存在时，脚本会列出路径并询问 `[y/N]` 是否覆盖；非交互（如 cron）可设 `PERF_BENCH_FORCE=1`。
 
 ### 填表
 
@@ -340,11 +346,11 @@ sudo perf record -F 997 --call-graph dwarf -p "$SERVER_PID" -o benchmark_log/art
 | `-p PID` | 只采 server |
 | `sleep 30` | 与 wrk `-d30s` 对齐 |
 
-**符号表（完整 flat 列表）：**
+**符号表（与脚本一致，Overhead ≥ 0.1%）：**
 
 ```bash
 sudo perf report -i benchmark_log/artifacts/v10.0_perf.data \
-  --stdio --sort symbol --percent-limit 0 \
+  --stdio --sort symbol --percent-limit 0.1 \
   > benchmark_log/artifacts/v10.0_perf_report.txt
 ```
 

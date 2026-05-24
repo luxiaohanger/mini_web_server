@@ -109,7 +109,7 @@ bash scripts/perf_bench.sh -v v10.0
 | 构建类型 | RelWithDebInfo |
 | 并发 wrk | `wrk -t2 -c20 -d30s http://127.0.0.1:8888/` |
 | 采样时长 | 30s |
-| 符号表 | `benchmark_log/artifacts/{版本}_perf_report.txt` |
+| 符号表 | `benchmark_log/artifacts/{版本}_perf_report.txt`（Overhead ≥ 0.1%） |
 | 火焰图 | `benchmark_log/artifacts/{版本}_flamegraph.svg` |
 | perf.data | `benchmark_log/artifacts/{版本}_perf.data` |
 
