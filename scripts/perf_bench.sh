@@ -460,11 +460,66 @@ append_kernel_boundary_table() {
     fi
     rm -f "$sc_err" "$tmp"
 
+    # §1：Linux perf 惯例 — 负向跳过「跳板 / 中断 / 内核实现」，保留程序员可读的 syscall 层
+    # 栈序与 stackcollapse 一致：左=root caller，右=leaf；扫描 _[k] 自左向右
     awk -v limit="$limit" '
     function strip_k_suffix(name) {
         sub(/_\[k\]$/, "", name)
         sub(/_\[k\]\+0x[0-9a-fA-F]+$/, "", name)
         return name
+    }
+    # syscall 进入跳板（x86_64 / arm64 等，非具体 syscall 名）
+    function skip_syscall_trampoline(sym) {
+        if (sym ~ /^entry_SYSCALL/) return 1
+        if (sym ~ /^do_syscall_64/) return 1
+        if (sym ~ /^do_syscall$/) return 1
+        if (sym ~ /^do_emulate_amd/) return 1
+        if (sym ~ /^syscall_enter_from_user_mode/) return 1
+        if (sym ~ /^syscall_return/) return 1
+        if (sym ~ /^x64_sys_call/) return 1
+        if (sym ~ /^xen_hypercall/) return 1
+        if (sym ~ /^el0t_64_sync/) return 1
+        if (sym ~ /^el0_svc/) return 1
+        if (sym ~ /^el0_interrupt/) return 1
+        if (sym ~ /^invoke_syscall/) return 1
+        return 0
+    }
+    # 中断 / IPI 向量（非应用 syscall 路径）
+    function skip_interrupt_context(sym) {
+        if (sym ~ /^asm_sysvec/) return 1
+        if (sym ~ /^sysvec_/) return 1
+        if (sym ~ /^irq_[A-Za-z]/) return 1
+        if (sym ~ /^__irq/) return 1
+        if (sym ~ /reschedule_ipi/) return 1
+        return 0
+    }
+    #  syscall 包装层之下的内核实现（火焰图/perf 阅读时不展开）
+    function skip_kernel_implementation(sym) {
+        if (sym ~ /^__do_sys_/ || sym ~ /^__do_compat_sys_/) return 1
+        if (sym ~ /^do_[a-z]/) return 1
+        if (sym ~ /^__tcp_/ || sym ~ /^tcp_/) return 1
+        if (sym ~ /^__udp_/ || sym ~ /^udp_/) return 1
+        if (sym ~ /^__ip_[a-z]/ || sym ~ /^ip_[a-z]/) return 1
+        if (sym ~ /^__sk_[a-z]/ || sym ~ /^skb_/ || sym ~ /^sock_[a-z]/) return 1
+        if (sym ~ /^__nf_/) return 1
+        return 0
+    }
+    function skip_for_syscall_table(sym) {
+        return (skip_syscall_trampoline(sym) \
+            || skip_interrupt_context(sym) \
+            || skip_kernel_implementation(sym))
+    }
+    function pick_readable_kernel_sym(frames, n,    i, sym) {
+        for (i = 1; i <= n; i++) {
+            if (frames[i] !~ /_\[k\]$/) {
+                continue
+            }
+            sym = strip_k_suffix(frames[i])
+            if (!skip_for_syscall_table(sym)) {
+                return sym
+            }
+        }
+        return ""
     }
     {
         wt = $2 + 0
@@ -473,12 +528,11 @@ append_kernel_boundary_table() {
         }
         total_samples += wt
         n = split($1, frames, ";")
-        for (i = 1; i <= n; i++) {
-            if (frames[i] ~ /_\[k\]$/) {
-                sym = strip_k_suffix(frames[i])
-                count[sym] += wt
-                break
-            }
+        sym = pick_readable_kernel_sym(frames, n)
+        if (sym != "") {
+            count[sym] += wt
+        } else {
+            unclassified += wt
         }
     }
     END {
@@ -487,6 +541,12 @@ append_kernel_boundary_table() {
             exit
         }
         printf "# Overhead  Symbol\n"
+        if (unclassified + 0 > 0) {
+            pct_u = unclassified * 100.0 / total_samples
+            if (pct_u + 0 >= limit + 0) {
+                printf " %7.2f%%  [unresolved-kernel-stack]\n", pct_u
+            }
+        }
         nout = 0
         for (sym in count) {
             pct[sym] = count[sym] * 100.0 / total_samples
@@ -494,8 +554,8 @@ append_kernel_boundary_table() {
                 order[++nout] = sym
             }
         }
-        if (nout == 0) {
-            print "# (未识别到用户→内核边界；请确认 perf record 使用了 -g / --call-graph)"
+        if (nout == 0 && unclassified == 0) {
+            print "# (未解析到可读内核符号；检查 call-graph 或见火焰图 kernel 子树)"
             exit
         }
         for (i = 1; i < nout; i++) {
@@ -542,8 +602,9 @@ generate_report() {
         printf '# 版本: %s\n' "$base"
         printf '#\n'
         printf '# 结构:\n'
-        printf '#   §1 内核态 — 每个样本栈上「用户→内核」边界的第一个内核符号\n'
-        printf '#            不展开 do_* / tcp_* 等内核内部子调用（对应用不可见）\n'
+        printf '#   §1 内核态 — Linux perf 惯例：可读 syscall 层（非内核实现细节）\n'
+        printf '#            负向跳过：entry_SYSCALL/do_syscall_64 跳板、asm_sysvec 中断、do_/tcp_/skb_ 等\n'
+        printf '#            保留帧多为 __x64_sys_* / sys_*（与火焰图 kernel 子树第一层一致）\n'
         printf '#   §2 用户态 (server) — 本程序符号，含 All + Self\n'
         printf '#\n'
         printf '# §1 口径: Overhead = 该边界符号样本数 / 全部 perf 样本数\n'
@@ -554,7 +615,7 @@ generate_report() {
         printf '# 调用链: %s_flamegraph.svg\n' "$base"
         printf '# 原始: %s\n#\n' "$(basename "$data")"
         printf '# === §1 内核态（用户→内核边界） ===\n'
-        printf '# 方法: perf script + stackcollapse-perf.pl --kernel；从最外层 caller 找第一个 _[k] 符号\n#\n'
+        printf '# 方法: perf script + stackcollapse --kernel；负向过滤后取首个可读内核帧（见上）\n#\n'
     } >"$report"
     append_kernel_boundary_table "$data" "$limit" "$report"
     {

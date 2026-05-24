@@ -274,7 +274,7 @@ BUILD_JOBS=2 bash scripts/perf_bench.sh -v v10.0
 
 | 段落 | 方法 |
 |------|------|
-| **§1 内核态** | `perf script -F …,trace` + `stackcollapse-perf.pl --kernel` → 每栈第一个 `_[k]` 符号 |
+| **§1 内核态** | 同火焰图栈 + **负向过滤**（跳过跳板/中断/内核实现）→ 可读 syscall 层 |
 | **§2 用户态** | `perf report --sort comm,dso,symbol -g none` 全量 inclusive → 筛 `Shared Object=server` |
 
 | 要点 | 说明 |

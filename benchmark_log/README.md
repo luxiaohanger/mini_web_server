@@ -234,12 +234,17 @@ mkdir -p benchmark_log/artifacts
 
 | 产物 | 回答的问题 | 怎么用 |
 |------|------------|--------|
-| **`_perf_report.txt` 符号表** | 内核花在哪些入口；用户态哪些函数最热 | §1 看 `__x64_sys_*` / `entry_SYSCALL_*` 等边界；§2 按 **All** 从高到低扫 server 符号 |
+| **`_perf_report.txt` 符号表** | 内核花在哪些 syscall；用户态哪些函数最热 | §1 看 `__x64_sys_*` / `sys_*`；§2 按 **All** 从高到低扫 server 符号 |
 | **`_flamegraph.svg` 火焰图** | 调用链：热点从哪条路径来、如何分叉 | 浏览器打开；Search 符号名；点宽条放大子树 |
 
 **符号表（分层）**
 
-- **§1 内核态**：`perf script` + `stackcollapse-perf.pl --kernel`，从最外层 caller 向里找 **第一个** `_[k]` 内核符号（等价于用户→内核边界），**不含**更深层 `do_*` / `tcp_*`。
+- **§1 内核态（syscall 表）**：与火焰图 **同源栈**（`perf script` + `stackcollapse --kernel`）。按 Linux perf 阅读惯例 **负向过滤**：
+  - **跳过** syscall 跳板：`entry_SYSCALL*`、`do_syscall_64*`、`el0_svc*` 等（否则全部并成一行）；
+  - **跳过** 中断/IPI：`asm_sysvec*` 等（非应用发起的 syscall）；
+  - **跳过** 内核实现：`do_*`、`__do_sys_*`、`tcp_*`、`skb_*` 等（火焰图里也不靠这些定方向）；
+  - **保留** 首个未跳过的内核帧 → 通常为 **`__x64_sys_*` / `sys_*`**，即程序员可读的 syscall 名。
+  - 栈过浅无法解析时可能出现 `[unresolved-kernel-stack]`，细节看火焰图。
 - **§2 用户态 (server)**：`perf report --sort comm,dso,symbol -g none` **全量 inclusive** 后筛 `Shared Object=server`（**不用** `--dsos=server`，避免 All 不含内核路径）。
 - **§2 表头**：报告内精简为 **`All / Self / Symbol` 三列**（脚本去掉 perf IPC 宽表与点线分隔）；perf 原始列名 Children 归一为 All。
 - **All 与 Self**（§2，分母均为 **全部 perf 样本**）：
