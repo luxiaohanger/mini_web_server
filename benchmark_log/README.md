@@ -223,10 +223,10 @@ mkdir -p benchmark_log/artifacts
 |------|------|
 | `{版本}_wrk.txt` | 同跑 wrk 输出（**RPS 不作版本验收**） |
 | `{版本}_perf.data` | perf 原始数据 |
-| `{版本}_perf_report.txt` | **热点符号表**（flat，Overhead ≥ 0.1%，一行一符号） |
+| `{版本}_perf_report.txt` | **inclusive 符号表**（flat，Overhead 含子函数，≥ 0.1%） |
 | `{版本}_flamegraph.svg` | **火焰图**（调用链，浏览器打开） |
 
-> 符号表为 **flat 列表**（`--call-graph none`），表头应为 `Overhead / Command / Shared Object / Symbol`。**不应**出现 `Children / Self` 或 `|---` 调用树；若出现请 `git pull` 后 `flamegraph -v` 重生。调用链只看火焰图。
+> 符号表：**一种格式** — `perf report --stdio --sort symbol --percent-limit 0.1 --call-graph none`（无 `--no-children`）。表头为 `Overhead / Command / Shared Object / Symbol`；**不要**出现 `Children/Self` 或 `|---` 树。
 
 ### 读 perf 产物（符号表 + 火焰图）
 
@@ -237,22 +237,14 @@ mkdir -p benchmark_log/artifacts
 | **`_perf_report.txt` 符号表** | 总体优化方向：还有哪些热点、各占多少 % | 看 `Overhead` 列，从高到低扫；前几名决定优先改什么 |
 | **`_flamegraph.svg` 火焰图** | 调用链：热点从哪条路径来、如何分叉 | 浏览器打开；Search 符号名；点宽条放大子树 |
 
-**符号表**
+**符号表（inclusive）**
 
-- 脚本生成 **flat 列表**：`--sort comm,dso,symbol --percent-limit 0.1 --call-graph none`；通常 **数百行**。生成后会校验表头，若仍是调用树则 **报错退出**（并自动尝试 `-g none` 等回退参数）。
-- **正确示例**（节选）：
-
-```text
-# Overhead  Command  Shared Object  Symbol
-    32.37%     server   server         Connection::sendHttpOnLoop
-    29.13%     server   libc.so.6      __GI___libc_write
-     8.75%     server   server         EventLoop::loop
-```
-
-- **错误示例**（勿当作符号表读）：表头 `Children / Self`，或出现 `|---` 缩进树 → 上万行、符号重复，是调用树展开。
-- **列含义**：`Overhead` = 占全部 CPU 采样比例；`Shared Object=server` 为用户态本程序；`[kernel.kallsyms]` / `[k]` 为内核。
-- `invoke` / `lambda` 多为 `std::function` 间接调用，优先看其附近的业务符号（`onHttp`、`enqueue` 等）。
-- 环境变量 **`PERF_REPORT_PERCENT_LIMIT`** 可改阈值；**`perf.data`** 保留，可事后手动重算。
+- **一条命令、一种口径**：`Overhead` = 采样栈中出现该符号时，**计入该符号及其调用的子函数**（perf 默认，**不用** `--no-children`）。
+- **flat 列表**：一行一符号，按 `Overhead` 降序；**不**展开 `|---` 调用树（`--call-graph none`）。
+- **注意**：父符号与子符号可能 **同时各占一行**，各行 **不必相加为 100%**。
+- **列含义**：`Shared Object=server` 为本程序用户态；`[kernel.kallsyms]` / `[k]` 为内核。
+- **读法**：`head -40` 看全局热点；定 src 优先级时 **重点看 `Shared Object=server` 的行**；`invoke`/`lambda` 多为 `std::function` 间接调用。
+- **`PERF_REPORT_PERCENT_LIMIT`** 可调阈值（默认 `0.1`）；调用关系见火焰图。
 
 **火焰图**
 
@@ -263,7 +255,7 @@ mkdir -p benchmark_log/artifacts
 
 **推荐流程（定方向 → 落方案）**
 
-1. 符号表：`head -40` 看 Overhead 最高几行；优先 **Shared Object=server** 的用户态符号。
+1. 符号表：`head -40`；**inclusive** 下内核/syscall 可能靠前，用户态看 **`Shared Object=server`** 行。
 2. 火焰图：对表内前几名 Search，确认从 `EventLoop::loop` 等根上的调用分支。
 3. 将结论写入该版本报告 §5.4「热点摘要」；§5.5 可粘贴符号表前几行或火焰图关键路径文字。
 4. wrk RPS 仍以报告 §4 为准；perf 只说明 CPU 花在哪，不代替版本验收。
@@ -292,7 +284,7 @@ mkdir -p benchmark_log/artifacts
 | 现象 | 处理 |
 |------|------|
 | `Permission denied` | `sudo perf record` |
-| 符号表上万行、含 `\|---` 或 `Children/Self` | 旧版/失败 report；`git pull` 后 `bash scripts/perf_bench.sh flamegraph -v <版本>` |
+| 符号表上万行、含 `\|---` 或 `Children/Self` | report 生成异常；`git pull` 后 `bash scripts/perf_bench.sh flamegraph -v <版本>` |
 | 符号表只有少量 `[unknown]` | 正常；若大面积 unknown → RelWithDebInfo 重建 |
 | `pgrep` 无输出 | 确认 server 已启动；用 `pgrep -x server` |
 | SSH 卡死 | 只用 `-c20`；`free -h`；tmux |
@@ -356,14 +348,16 @@ sudo perf record -F 997 --call-graph dwarf -p "$SERVER_PID" -o benchmark_log/art
 | `-p PID` | 只采 server |
 | `sleep 30` | 与 wrk `-d30s` 对齐 |
 
-**符号表（与脚本一致，flat，Overhead ≥ 0.1%）：**
+**符号表（与脚本一致，inclusive flat，Overhead ≥ 0.1%）：**
 
 ```bash
 sudo perf report -i benchmark_log/artifacts/v10.0_perf.data \
-  --stdio --sort comm,dso,symbol --percent-limit 0.1 --call-graph none \
+  --stdio --sort symbol --percent-limit 0.1 --call-graph none \
   > benchmark_log/artifacts/v10.0_perf_report.txt
-head -30 benchmark_log/artifacts/v10.0_perf_report.txt
+head -40 benchmark_log/artifacts/v10.0_perf_report.txt
 ```
+
+（不要加 `--no-children`；不要加 `-g`。）
 
 **火焰图（需 FlameGraph）：**
 

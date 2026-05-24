@@ -207,10 +207,10 @@ bash scripts/perf_bench.sh flamegraph -v v10.0
 |------|------|
 | `{版本}_wrk.txt` | wrk 输出 |
 | `{版本}_perf.data` | perf 数据 |
-| `{版本}_perf_report.txt` | flat 热点符号表（≥0.1%，`head -40` 定瓶颈） |
-| `{版本}_flamegraph.svg` | 火焰图（调用链，浏览器打开） |
+| `{版本}_perf_report.txt` | inclusive flat 符号表（Overhead 含子函数，≥0.1%） |
+| `{版本}_flamegraph.svg` | 火焰图（调用链） |
 
-**读法**：符号表须为 flat（表头 `Overhead / Command / Shared Object / Symbol`）；火焰图 Search 同名符号看 caller。详见 [`benchmark_log/README.md`](../benchmark_log/README.md)「读 perf 产物（符号表 + 火焰图）」。
+**读法**：符号表 `head -40`（inclusive；用户态看 `Shared Object=server`）；火焰图 Search 看 caller。详见 [`benchmark_log/README.md`](../benchmark_log/README.md)「读 perf 产物（符号表 + 火焰图）」。
 
 记录文档：`benchmark_log/{版本}_{YYYYMMDD}_bench.md`（wrk + perf 同一份）。详见 [`benchmark_log/README.md`](../benchmark_log/README.md)。
 
