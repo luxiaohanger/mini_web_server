@@ -223,10 +223,10 @@ mkdir -p benchmark_log/artifacts
 |------|------|
 | `{版本}_wrk.txt` | 同跑 wrk 输出（**RPS 不作版本验收**） |
 | `{版本}_perf.data` | perf 原始数据 |
-| `{版本}_perf_report.txt` | **inclusive 符号表**（flat，Overhead 含子函数，≥ 0.1%） |
+| `{版本}_perf_report.txt` | **分层符号表**（§1 内核边界 + §2 server All/Self，≥ 0.1%） |
 | `{版本}_flamegraph.svg` | **火焰图**（调用链，浏览器打开） |
 
-> 符号表：**一种格式** — `perf report --stdio --sort comm,dso,symbol --percent-limit 0.1 -g none`（inclusive，无 `--no-children`）。表头可能是 `Overhead / ...` 或 **`Children / Self / ...`**（均为 flat 一行一符号；**看 Children 列** = inclusive）。
+> 符号表：**两层** — §1 内核边界（`perf script` 取用户→内核第一个符号，不展开内核内部）+ §2 server 用户态（`perf report` inclusive，看 **All** 列排序）。
 
 ### 读 perf 产物（符号表 + 火焰图）
 
@@ -234,19 +234,22 @@ mkdir -p benchmark_log/artifacts
 
 | 产物 | 回答的问题 | 怎么用 |
 |------|------------|--------|
-| **`_perf_report.txt` 符号表** | 总体优化方向：还有哪些热点、各占多少 % | 看 `Overhead` 列，从高到低扫；前几名决定优先改什么 |
+| **`_perf_report.txt` 符号表** | 内核花在哪些入口；用户态哪些函数最热 | §1 看 `__x64_sys_*` / `entry_SYSCALL_*` 等边界；§2 按 **All** 从高到低扫 server 符号 |
 | **`_flamegraph.svg` 火焰图** | 调用链：热点从哪条路径来、如何分叉 | 浏览器打开；Search 符号名；点宽条放大子树 |
 
-**符号表（inclusive）**
+**符号表（分层）**
 
-- **一条命令、一种口径**：`--sort comm,dso,symbol --percent-limit 0.1 -g none`（**`-g none`** = 不展开 `|---` 调用树；**不用** `--no-children`）。
-- **表头两种（均合法）**：
-  - `Overhead / Command / ...` → 看 **Overhead** 列（inclusive）
-  - `Children / Self / Command / ...` → 看 **Children** 列（inclusive）；**Self** 仅为函数自身，勿当主排序依据
-- **注意**：父符号与子符号可能 **同时各占一行**，各行 **不必相加为 100%**。
-- **列含义**：`Shared Object=server` 为本程序用户态；`[kernel.kallsyms]` / `[k]` 为内核。
-- **读法**：`head -40` 看全局热点；定 src 优先级时 **重点看 `Shared Object=server` 的行**；`invoke`/`lambda` 多为 `std::function` 间接调用。
-- **`PERF_REPORT_PERCENT_LIMIT`** 可调阈值（默认 `0.1`）；调用关系见火焰图。
+- **§1 内核态**：`perf script` 逐样本解析栈，从最外层 caller 向采样点找 **第一个** `[kernel.kallsyms]` 符号 → 即 libc/syscall 进入内核的 **最外层**（如 `__x64_sys_epoll_wait`），**不含** `do_epoll_wait`、`tcp_*` 等内部子调用。Overhead = 占 **全部 perf 样本** 的比例。
+- **§2 用户态 (server)**：`perf report --sort symbol --dsos=server -g none`（inclusive，**不用** `--no-children`）。
+- **§2 表头**：
+  - 常见：`All / Self / ...`（脚本将 perf 原始列名 **Children** 归一为 **All**）
+  - 旧版 perf 仅 `Overhead / ...` 时，**Overhead 列语义同 All**
+- **All 与 Self**（§2，分母均为 **全部 perf 样本**）：
+  - **All**：栈上 **经过** 该函数及其子函数的样本占比（含 callees；定优化优先级 **看此列**）
+  - **Self**：PC **仅落在该函数体内** 的样本占比（不含 callees；判断热点在自身还是下游）
+  - **勿** 将同一行的 Self + All 相加；**勿** 将表中各行百分比相加（父子行重叠计数）
+- **读法**：§1 判断 syscall/内核入口占比；§2 定 src 优化优先级；`invoke`/`lambda` 多为 `std::function` 间接调用。
+- **`PERF_REPORT_PERCENT_LIMIT`** 可调阈值（默认 `0.1`）；完整调用链见火焰图。
 
 **火焰图**
 
@@ -257,8 +260,8 @@ mkdir -p benchmark_log/artifacts
 
 **推荐流程（定方向 → 落方案）**
 
-1. 符号表：`head -40`；**inclusive** 下内核/syscall 可能靠前，用户态看 **`Shared Object=server`** 行。
-2. 火焰图：对表内前几名 Search，确认从 `EventLoop::loop` 等根上的调用分支。
+1. 符号表：§1 内核边界（syscall 入口占比）→ §2 server 按 **All** 排序。
+2. 火焰图：对 §2 前几名 Search，确认从 `EventLoop::loop` 等根上的调用分支。
 3. 将结论写入该版本报告 §5.4「热点摘要」；§5.5 可粘贴符号表前几行或火焰图关键路径文字。
 4. wrk RPS 仍以报告 §4 为准；perf 只说明 CPU 花在哪，不代替版本验收。
 
@@ -287,7 +290,7 @@ mkdir -p benchmark_log/artifacts
 |------|------|
 | `Permission denied` | `sudo perf record` |
 | 符号表上万行、含 `\|---` 分支 | 调用树异常；`git pull` 后 `flamegraph -v` 重生 |
-| 表头为 `Children/Self` 但无 `\|---` | **正常** flat；按 **Children** 列读 inclusive |
+| 表头为 `All/Self`（或 perf 原始 `Children/Self`）且无 `\|---` | **正常** flat；按 **All** 列读 inclusive |
 | 符号表只有少量 `[unknown]` | 正常；若大面积 unknown → RelWithDebInfo 重建 |
 | `pgrep` 无输出 | 确认 server 已启动；用 `pgrep -x server` |
 | SSH 卡死 | 只用 `-c20`；`free -h`；tmux |

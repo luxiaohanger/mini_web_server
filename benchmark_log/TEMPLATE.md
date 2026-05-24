@@ -109,7 +109,7 @@ bash scripts/perf_bench.sh -v v10.0
 | 构建类型 | RelWithDebInfo |
 | 并发 wrk | `wrk -t2 -c20 -d30s http://127.0.0.1:8888/` |
 | 采样时长 | 30s |
-| 符号表 | `benchmark_log/artifacts/{版本}_perf_report.txt`（inclusive flat，≥ 0.1%） |
+| 符号表 | `benchmark_log/artifacts/{版本}_perf_report.txt`（§1 内核边界 + §2 server All/Self，≥ 0.1%） |
 | 火焰图 | `benchmark_log/artifacts/{版本}_flamegraph.svg` |
 | perf.data | `benchmark_log/artifacts/{版本}_perf.data` |
 
@@ -121,16 +121,16 @@ bash scripts/perf_bench.sh -v v10.0
 
 ### 5.4 热点摘要
 
-> 符号表为 **inclusive flat**：Overhead **含子函数**；`head -40` 后填 §5.4（用户态看 `Shared Object=server`）。调用链看火焰图。
+> 符号表分两层：§1 内核边界（syscall 入口，占全部样本 %）；§2 server 按 **All**（含子函数，inclusive）排序，**Self** 看函数自身。调用链看火焰图。
 
 | 占比（约） | 符号 / 函数 | 说明 |
 |------------|-------------|------|
-| | | |
+| | | （§1 内核入口 或 §2 server 符号） |
 
 ### 5.5 符号表摘录（可选）
 
 ```text
-（粘贴 perf_report.txt 中 Overhead 最高的若干行）
+（粘贴 perf_report.txt §1 或 §2 中占比最高的若干行）
 ```
 
 ---

@@ -265,22 +265,25 @@ BUILD_JOBS=2 bash scripts/perf_bench.sh -v v10.0
 
 | 文件 | 内容 | 入库 |
 |------|------|------|
-| `{版本}_wrk.txt` | 与 perf 同跑的 wrk 终端输出 | 否 |
+| `{版本}_wrk.txt` | 与 perf 同跑的 wrk 输出（仅写入文件） | 否 |
 | `{版本}_perf.data` | perf 原始采样 | 否 |
-| `{版本}_perf_report.txt` | **inclusive flat 符号表**（见下） | 否 |
+| `{版本}_perf_report.txt` | **分层符号表**（§1 内核边界 + §2 server All/Self） | 否 |
 | `{版本}_flamegraph.svg` | 火焰图（调用链） | 否 |
 
-**符号表生成命令（脚本内置，勿改口径）：**
+**符号表生成（脚本内置，勿改口径）：**
 
-```bash
-perf report -i <perf.data> --stdio --sort comm,dso,symbol --percent-limit 0.1 -g none
-```
+| 段落 | 方法 |
+|------|------|
+| **§1 内核态** | `perf script` → 每样本栈上「用户→内核」边界的第一个内核符号（不展开内部） |
+| **§2 用户态** | `perf report --sort symbol --dsos=server --percent-limit 0.1 -g none`（inclusive） |
 
 | 要点 | 说明 |
 |------|------|
-| **inclusive** | **不用** `--no-children`；表头为 **Overhead** 或 **Children** 列（均含子函数） |
-| **flat** | **`-g none`** → 一行一符号；**无** `\|---` 树；若有 `\|---` 才是异常 |
-| **读法** | `head -40` 看热点；用户态看 `Shared Object=server`；调用链看 SVG |
+| **§1** | 一行一个 **syscall/内核入口**（如 `__x64_sys_epoll_wait`），非整段 `[kernel.kallsyms]` 一行，也非 `do_*`/`tcp_*` 内部 |
+| **§2 inclusive** | **不用** `--no-children`；报告表头 **All**（perf 原始列名 Children）；旧版仅 Overhead 时语义同 All |
+| **§2 flat** | **`-g none`** → 无 `\|---` 树 |
+| **§2 读列** | **All** = 含子函数（排序依据）；**Self** = 仅函数自身；分母均为全部 perf 样本 |
+| **读法** | §1 看内核入口；§2 按 All 定 src 优先级；调用链看 SVG |
 
 结论写入 `benchmark_log/{版本}_{YYYYMMDD}_bench.md` §5（模板见 `benchmark_log/TEMPLATE.md`）。
 

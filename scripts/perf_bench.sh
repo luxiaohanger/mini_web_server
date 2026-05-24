@@ -57,7 +57,7 @@ usage() {
   PERF_REPORT_PERCENT_LIMIT  符号表阈值 %（默认 0.1）
   PERF_BENCH_FORCE=1           跳过覆盖确认
 
-符号表: inclusive flat（-g none，Overhead 含子函数）；调用链见 SVG。
+符号表: 分层（§1 内核边界 + §2 server All/Self）；调用链见 SVG。
 详情: scripts/SCRIPTS.md
 
 示例:
@@ -251,8 +251,8 @@ start_server() {
 run_wrk() {
     local out="$1"
     need_cmd wrk
-    log "wrk -t${WRK_THREADS} -c${WRK_CONNECTIONS} -d${DURATION}s $WRK_URL"
-    wrk -t"$WRK_THREADS" -c"$WRK_CONNECTIONS" -d"${DURATION}s" "$WRK_URL" | tee "$out"
+    log "wrk -t${WRK_THREADS} -c${WRK_CONNECTIONS} -d${DURATION}s $WRK_URL → $out"
+    wrk -t"$WRK_THREADS" -c"$WRK_CONNECTIONS" -d"${DURATION}s" "$WRK_URL" >"$out"
 }
 
 run_sample() {
@@ -288,7 +288,7 @@ generate_flamegraph() {
 }
 
 # 判断 perf report 是否为 flat 符号表（非调用树）
-# 部分 perf 版本表头为 Overhead；部分为 Children/Self（均为 flat 一行一符号，非树）
+# 部分 perf 版本表头为 Overhead；部分为 Children/Self（提取后 Children 归一为 All）
 is_flat_symbol_report() {
     local file="$1"
     [[ -f "$file" ]] || return 1
@@ -304,28 +304,166 @@ is_flat_symbol_report() {
     return 1
 }
 
-# 写入 flat inclusive 符号表（Overhead 含子函数；无调用树）
-write_flat_symbol_report() {
-    local data="$1" limit="$2" dest="$3"
+# 从 perf report 输出提取表头与数据行；Children 列名归一为 All
+extract_perf_table() {
+    local file="$1"
+    awk '
+        /^# (Overhead|Children)/ {
+            if ($0 ~ /^# Children/) {
+                sub(/^# Children/, "# All")
+            }
+            show = 1
+        }
+        show && /^# \(Cannot load tips/ { exit }
+        show { print }
+    ' "$file"
+}
+
+run_perf_report_flat() {
+    local data="$1" dest="$2"
+    shift 2
     local tmp err
     tmp="$(mktemp "${dest}.XXXXXX")"
     err="${tmp}.err"
 
-    # -g none：不展开调用树；comm,dso,symbol 在各版 perf 上 flat 更稳
-    if ! perf_cmd report -i "$data" --stdio --sort comm,dso,symbol --percent-limit "$limit" \
-        -g none >"$tmp" 2>"$err"; then
+    if ! perf_cmd report -i "$data" "$@" >"$tmp" 2>"$err"; then
         warn "perf report stderr: $(head -5 "$err" 2>/dev/null || true)"
         rm -f "$tmp" "$err"
-        die "perf report 失败；手动: perf report -i <data> --stdio --sort comm,dso,symbol --percent-limit ${limit} -g none"
+        return 1
     fi
     rm -f "$err"
     if ! is_flat_symbol_report "$tmp"; then
         warn "perf report 前几行:"
-        head -25 "$tmp" >&2 || true
+        head -20 "$tmp" >&2 || true
         rm -f "$tmp"
-        die "perf report 未生成 flat 符号表（出现 |--- 调用树或表头无法识别）。请执行: perf report -i <data> --stdio --sort comm,dso,symbol --percent-limit ${limit} -g none"
+        return 1
     fi
-    mv "$tmp" "$dest"
+    extract_perf_table "$tmp" >"$dest"
+    rm -f "$tmp"
+    return 0
+}
+
+append_kernel_boundary_table() {
+    local data="$1" limit="$2" report="$3"
+    local tmp err
+    tmp="$(mktemp "${report}.kern.XXXXXX")"
+    err="${tmp}.err"
+
+    if ! perf_cmd script -i "$data" >"$tmp" 2>"$err"; then
+        warn "perf script stderr: $(head -5 "$err" 2>/dev/null || true)"
+        rm -f "$tmp" "$err"
+        die "perf script (内核边界) 失败"
+    fi
+    rm -f "$err"
+
+    awk -v limit="$limit" '
+    function is_kernel(dso,    d) {
+        d = dso
+        sub(/^[[:space:]]+/, "", d)
+        sub(/[[:space:]]+$/, "", d)
+        return (d == "[kernel.kallsyms]" || d == "[k]")
+    }
+    function parse_line(line,    rest, lp, rp) {
+        if (line !~ /^[[:space:]]+[0-9a-fA-F]+[[:space:]]+/) {
+            return 0
+        }
+        rest = line
+        sub(/^[[:space:]]+[0-9a-fA-F]+[[:space:]]+/, "", rest)
+        lp = index(rest, "(")
+        rp = match(rest, /\)[[:space:]]*$/)
+        if (lp <= 0 || rp <= 0) {
+            return 0
+        }
+        parsed_sym = substr(rest, 1, lp - 1)
+        parsed_dso = substr(rest, lp + 1, rp - lp - 2)
+        sub(/[[:space:]]+$/, "", parsed_sym)
+        return 1
+    }
+    function flush_stack(    i) {
+        if (n == 0) {
+            return
+        }
+        total_samples++
+        for (i = n; i >= 1; i--) {
+            if (!parse_line(stack[i])) {
+                continue
+            }
+            if (is_kernel(parsed_dso)) {
+                count[parsed_sym]++
+                return
+            }
+        }
+    }
+    END {
+        flush_stack()
+        if (total_samples == 0) {
+            print "# (无调用栈样本；检查 perf.data 是否含 call-graph)"
+            exit
+        }
+        printf "# Overhead  Symbol\n"
+        nout = 0
+        for (sym in count) {
+            pct[sym] = count[sym] * 100.0 / total_samples
+            if (pct[sym] + 0 >= limit + 0) {
+                order[++nout] = sym
+            }
+        }
+        for (i = 1; i < nout; i++) {
+            for (j = i + 1; j <= nout; j++) {
+                if (pct[order[j]] > pct[order[i]]) {
+                    t = order[i]; order[i] = order[j]; order[j] = t
+                }
+            }
+        }
+        for (i = 1; i <= nout; i++) {
+            sym = order[i]
+            printf " %7.2f%%  %s\n", pct[sym], sym
+        }
+    }
+    /^[[:space:]]+[0-9a-fA-F]+[[:space:]]+/ {
+        stack[++n] = $0
+        next
+    }
+    {
+        flush_stack()
+        delete stack
+        n = 0
+    }
+    ' "$tmp" >>"$report"
+    rm -f "$tmp"
+}
+
+append_user_server_table() {
+    local data="$1" limit="$2" report="$3"
+    local tmp_user tmp_all
+    tmp_user="$(mktemp "${report}.user.XXXXXX")"
+
+    if run_perf_report_flat "$data" "$tmp_user" --stdio --sort symbol --percent-limit "$limit" \
+        -g none --dsos=server; then
+        cat "$tmp_user" >>"$report"
+        rm -f "$tmp_user"
+        return 0
+    fi
+
+    warn "perf --dsos=server 不可用，从全量表筛选 server 行"
+    tmp_all="$(mktemp "${report}.all.XXXXXX")"
+    if ! run_perf_report_flat "$data" "$tmp_all" --stdio --sort comm,dso,symbol \
+        --percent-limit "$limit" -g none; then
+        rm -f "$tmp_user" "$tmp_all"
+        die "perf report (用户态) 失败"
+    fi
+    awk '
+        /^# (Overhead|Children)/ {
+            if ($0 ~ /^# Children/) {
+                sub(/^# Children/, "# All")
+            }
+            print
+            hdr = 1
+            next
+        }
+        hdr && /^[[:space:]]+[0-9]/ && $0 ~ /[[:space:]]server[[:space:]]/ { print }
+    ' "$tmp_all" >>"$report"
+    rm -f "$tmp_user" "$tmp_all"
 }
 
 generate_report() {
@@ -334,26 +472,33 @@ generate_report() {
     base="$(artifact_base)"
     report="$ARTIFACTS_DIR/${base}_perf_report.txt"
     limit="$PERF_REPORT_PERCENT_LIMIT"
-    log "perf 符号表 → $report（inclusive，Overhead ≥ ${limit}%）"
+    log "perf 符号表 → $report（分层：内核边界 + server 用户态，≥ ${limit}%）"
     {
-        printf '# mini_web_server perf 符号表\n'
+        printf '# mini_web_server perf 符号表（分层摘要）\n'
         printf '# 版本: %s\n' "$base"
-        printf '# 口径: inclusive — 含子函数（未使用 --no-children）\n'
-        printf '# 表头: Overhead 列，或 Children 列（均为 inclusive）；Self 列仅为函数自身\n'
-        printf '# 阅读: 按 inclusive 占比降序；看 Children 或 Overhead，勿只看 Self\n'
-        printf '#       Shared Object=server 为用户态；[k] 为内核\n'
-        printf '# 过滤: >= %s%%（--percent-limit %s -g none）\n' "$limit" "$limit"
-        printf '# 命令: perf report --stdio --sort comm,dso,symbol --percent-limit %s -g none\n' "$limit"
-        printf '# 调用链: 见 %s_flamegraph.svg\n' "$base"
+        printf '#\n'
+        printf '# 结构:\n'
+        printf '#   §1 内核态 — 每个样本栈上「用户→内核」边界的第一个内核符号\n'
+        printf '#            不展开 do_* / tcp_* 等内核内部子调用（对应用不可见）\n'
+        printf '#   §2 用户态 (server) — 本程序符号，含 All + Self\n'
+        printf '#\n'
+        printf '# §1 口径: Overhead = 该边界符号样本数 / 全部 perf 样本数\n'
+        printf '# §2 口径: inclusive（未使用 --no-children）；All/Overhead 分母同为全部样本\n'
+        printf '#   All  = 含子函数的总占比（排序依据；perf 原始列名 Children）\n'
+        printf '#   Self = 仅函数自身（参考）；勿把 Self+All 相加\n'
+        printf '# 过滤: >= %s%%  |  -g none（§2 无 |--- 调用树）\n' "$limit"
+        printf '# 调用链: %s_flamegraph.svg\n' "$base"
         printf '# 原始: %s\n#\n' "$(basename "$data")"
+        printf '# === §1 内核态（用户→内核边界） ===\n'
+        printf '# 方法: perf script 逐样本，从最外层 caller 向采样点找第一个 [kernel.kallsyms] 符号\n#\n'
     } >"$report"
-    write_flat_symbol_report "$data" "$limit" "${report}.body"
-    cat "${report}.body" >>"$report"
-    rm -f "${report}.body"
+    append_kernel_boundary_table "$data" "$limit" "$report"
+    {
+        printf '\n# === §2 用户态明细 (Shared Object: server) ===\n'
+        printf '# 命令: perf report --sort symbol --dsos=server --percent-limit %s -g none\n#\n' "$limit"
+    } >>"$report"
+    append_user_server_table "$data" "$limit" "$report"
     lines="$(wc -l <"$report" | tr -d ' ')"
-    if [[ "$lines" -gt 2000 ]]; then
-        warn "符号表行数偏多 (${lines})；可调高 PERF_REPORT_PERCENT_LIMIT（如 0.2）"
-    fi
     log "符号表: $report (${lines} 行)"
 }
 
@@ -451,7 +596,7 @@ cmd_run() {
     log "完成 → $ARTIFACTS_DIR"
     log "  wrk:        ${base}_wrk.txt"
     log "  perf.data:  ${base}_perf.data"
-    log "  report:     ${base}_perf_report.txt（inclusive 符号表，≥${PERF_REPORT_PERCENT_LIMIT}%）"
+    log "  report:     ${base}_perf_report.txt（§1 内核边界 + §2 server，≥${PERF_REPORT_PERCENT_LIMIT}%）"
     log "  flamegraph: ${base}_flamegraph.svg（调用链）"
     log "请更新或新建 benchmark_log/${DESIGN_VER}_YYYYMMDD_bench.md（wrk + perf 同一份）"
 
