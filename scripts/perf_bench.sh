@@ -287,14 +287,15 @@ generate_flamegraph() {
     log "火焰图: $svg ($(wc -c <"$svg" | tr -d ' ') bytes)"
 }
 
-# 判断 perf report 是否为 flat 符号表（非 Children/Self 调用树）
+# 判断 perf report 是否为 flat 符号表（非调用树）
 is_flat_symbol_report() {
     local file="$1"
     [[ -f "$file" ]] || return 1
+    # 调用树特征：Children/Self 表头，或 |--xx%-- 分支行
     if grep -qE '^# Children[[:space:]]+Self' "$file"; then
         return 1
     fi
-    if grep -qE '^[[:space:]]+\|' "$file"; then
+    if grep -qE '^[[:space:]]+\|--' "$file"; then
         return 1
     fi
     if ! grep -qE '^# Overhead[[:space:]]' "$file"; then
@@ -306,17 +307,23 @@ is_flat_symbol_report() {
 # 写入 flat inclusive 符号表（Overhead 含子函数；无调用树）
 write_flat_symbol_report() {
     local data="$1" limit="$2" dest="$3"
-    local tmp
+    local tmp err
     tmp="$(mktemp "${dest}.XXXXXX")"
+    err="${tmp}.err"
 
-    if ! perf_cmd report -i "$data" --stdio --sort symbol --percent-limit "$limit" \
-        --call-graph none >"$tmp" 2>/dev/null; then
-        rm -f "$tmp"
-        die "perf report 失败；手动: perf report -i <data> --stdio --sort symbol --percent-limit ${limit} --call-graph none"
+    # -g none：不展开调用树；comm,dso,symbol 在各版 perf 上 flat 更稳
+    if ! perf_cmd report -i "$data" --stdio --sort comm,dso,symbol --percent-limit "$limit" \
+        -g none >"$tmp" 2>"$err"; then
+        warn "perf report stderr: $(head -5 "$err" 2>/dev/null || true)"
+        rm -f "$tmp" "$err"
+        die "perf report 失败；手动: perf report -i <data> --stdio --sort comm,dso,symbol --percent-limit ${limit} -g none"
     fi
+    rm -f "$err"
     if ! is_flat_symbol_report "$tmp"; then
+        warn "perf report 前几行:"
+        head -25 "$tmp" >&2 || true
         rm -f "$tmp"
-        die "perf report 未生成 flat 符号表（出现调用树或表头异常）。请确认 perf 支持 --call-graph none"
+        die "perf report 未生成 flat 符号表（出现调用树或表头异常）。请执行: perf report -i <data> --stdio --sort comm,dso,symbol --percent-limit ${limit} -g none"
     fi
     mv "$tmp" "$dest"
 }
@@ -332,7 +339,8 @@ generate_report() {
         printf '# mini_web_server perf 符号表\n'
         printf '# 版本: %s\n' "$base"
         printf '# 口径: inclusive — Overhead 含该符号及其调用的子函数（未使用 --no-children）\n'
-        printf '# 过滤: Overhead >= %s%%（--percent-limit %s --call-graph none）\n' "$limit" "$limit"
+        printf '# 过滤: Overhead >= %s%%（--percent-limit %s -g none）\n' "$limit" "$limit"
+        printf '# 命令: perf report --stdio --sort comm,dso,symbol --percent-limit %s -g none\n' "$limit"
         printf '# 阅读: 按 Overhead 降序；同一采样可计入多行，各行不必相加为 100%%\n'
         printf '#       Shared Object=server 为用户态；[k]/[kernel.kallsyms] 为内核\n'
         printf '# 调用链: 见 %s_flamegraph.svg\n' "$base"

@@ -226,7 +226,7 @@ mkdir -p benchmark_log/artifacts
 | `{版本}_perf_report.txt` | **inclusive 符号表**（flat，Overhead 含子函数，≥ 0.1%） |
 | `{版本}_flamegraph.svg` | **火焰图**（调用链，浏览器打开） |
 
-> 符号表：**一种格式** — `perf report --stdio --sort symbol --percent-limit 0.1 --call-graph none`（无 `--no-children`）。表头为 `Overhead / Command / Shared Object / Symbol`；**不要**出现 `Children/Self` 或 `|---` 树。
+> 符号表：**一种格式** — `perf report --stdio --sort comm,dso,symbol --percent-limit 0.1 -g none`（inclusive，无 `--no-children`）。表头为 `Overhead / Command / Shared Object / Symbol`。
 
 ### 读 perf 产物（符号表 + 火焰图）
 
@@ -239,8 +239,7 @@ mkdir -p benchmark_log/artifacts
 
 **符号表（inclusive）**
 
-- **一条命令、一种口径**：`Overhead` = 采样栈中出现该符号时，**计入该符号及其调用的子函数**（perf 默认，**不用** `--no-children`）。
-- **flat 列表**：一行一符号，按 `Overhead` 降序；**不**展开 `|---` 调用树（`--call-graph none`）。
+- **一条命令、一种口径**：`--sort comm,dso,symbol --percent-limit 0.1 -g none`（**`-g none`** = 不展开调用树；**不用** `--no-children` → Overhead **含子函数**）。
 - **注意**：父符号与子符号可能 **同时各占一行**，各行 **不必相加为 100%**。
 - **列含义**：`Shared Object=server` 为本程序用户态；`[kernel.kallsyms]` / `[k]` 为内核。
 - **读法**：`head -40` 看全局热点；定 src 优先级时 **重点看 `Shared Object=server` 的行**；`invoke`/`lambda` 多为 `std::function` 间接调用。
@@ -352,12 +351,12 @@ sudo perf record -F 997 --call-graph dwarf -p "$SERVER_PID" -o benchmark_log/art
 
 ```bash
 sudo perf report -i benchmark_log/artifacts/v10.0_perf.data \
-  --stdio --sort symbol --percent-limit 0.1 --call-graph none \
+  --stdio --sort comm,dso,symbol --percent-limit 0.1 -g none \
   > benchmark_log/artifacts/v10.0_perf_report.txt
 head -40 benchmark_log/artifacts/v10.0_perf_report.txt
 ```
 
-（不要加 `--no-children`；不要加 `-g`。）
+（不要加 `--no-children`；不要加 `-g` 以外的调用图选项。）
 
 **火焰图（需 FlameGraph）：**
 
