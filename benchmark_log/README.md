@@ -244,7 +244,7 @@ mkdir -p benchmark_log/artifacts
   - **跳过** 中断/IPI：`asm_sysvec*` 等（非应用发起的 syscall）；
   - **跳过** 内核实现：`do_*`、`__do_sys_*`、`tcp_*`、`skb_*` 等（火焰图里也不靠这些定方向）；
   - **保留** 首个未跳过的内核帧 → 通常为 **`__x64_sys_*` / `sys_*`**，即程序员可读的 syscall 名。
-  - 栈过浅无法解析时可能出现 `[unresolved-kernel-stack]`，细节看火焰图。
+  - 栈过浅无法解析时可能出现 `[unresolved-kernel-stack]`（**仅含内核帧**且仍无法归因）；**纯用户态样本不占 §1 行**。细节看火焰图。
 - **§2 用户态 (server)**：`perf report --sort comm,dso,symbol -g none` **全量 inclusive** 后筛 `Shared Object=server`（**不用** `--dsos=server`，避免 All 不含内核路径）。
 - **§2 表头**：报告内精简为 **`All / Self / Symbol` 三列**（脚本去掉 perf IPC 宽表与点线分隔）；perf 原始列名 Children 归一为 All。
 - **All 与 Self**（§2，分母均为 **全部 perf 样本**）：

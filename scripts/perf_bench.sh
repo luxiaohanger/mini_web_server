@@ -476,6 +476,7 @@ append_kernel_boundary_table() {
         if (sym ~ /^do_emulate_amd/) return 1
         if (sym ~ /^syscall_enter_from_user_mode/) return 1
         if (sym ~ /^syscall_return/) return 1
+        if (sym ~ /^syscall_exit_to_user_mode/) return 1
         if (sym ~ /^x64_sys_call/) return 1
         if (sym ~ /^xen_hypercall/) return 1
         if (sym ~ /^el0t_64_sync/) return 1
@@ -489,8 +490,10 @@ append_kernel_boundary_table() {
         if (sym ~ /^asm_sysvec/) return 1
         if (sym ~ /^sysvec_/) return 1
         if (sym ~ /^irq_[A-Za-z]/) return 1
+        if (sym ~ /^irqentry_/) return 1
         if (sym ~ /^__irq/) return 1
         if (sym ~ /reschedule_ipi/) return 1
+        if (sym ~ /exit_to_user_mode/) return 1
         return 0
     }
     #  syscall 包装层之下的内核实现（火焰图/perf 阅读时不展开）
@@ -508,6 +511,27 @@ append_kernel_boundary_table() {
         return (skip_syscall_trampoline(sym) \
             || skip_interrupt_context(sym) \
             || skip_kernel_implementation(sym))
+    }
+    function stack_has_kernel(frames, n,    i) {
+        for (i = 1; i <= n; i++) {
+            if (frames[i] ~ /_\[k\]$/) {
+                return 1
+            }
+        }
+        return 0
+    }
+    function pick_fallback_kernel_sym(frames, n,    i, sym) {
+        # 栈上无 __x64_sys_*（展开不足）时：仅跳过跳板/中断，保留 __do_sys_* 等
+        for (i = 1; i <= n; i++) {
+            if (frames[i] !~ /_\[k\]$/) {
+                continue
+            }
+            sym = strip_k_suffix(frames[i])
+            if (!skip_syscall_trampoline(sym) && !skip_interrupt_context(sym)) {
+                return sym
+            }
+        }
+        return ""
     }
     function pick_readable_kernel_sym(frames, n,    i, sym) {
         for (i = 1; i <= n; i++) {
@@ -528,7 +552,13 @@ append_kernel_boundary_table() {
         }
         total_samples += wt
         n = split($1, frames, ";")
+        if (!stack_has_kernel(frames, n)) {
+            next
+        }
         sym = pick_readable_kernel_sym(frames, n)
+        if (sym == "") {
+            sym = pick_fallback_kernel_sym(frames, n)
+        }
         if (sym != "") {
             count[sym] += wt
         } else {
@@ -604,7 +634,7 @@ generate_report() {
         printf '# 结构:\n'
         printf '#   §1 内核态 — Linux perf 惯例：可读 syscall 层（非内核实现细节）\n'
         printf '#            负向跳过：entry_SYSCALL/do_syscall_64 跳板、asm_sysvec 中断、do_/tcp_/skb_ 等\n'
-        printf '#            保留帧多为 __x64_sys_* / sys_*（与火焰图 kernel 子树第一层一致）\n'
+        printf '#            纯用户态样本不计入 §1 行；无法解析时见 [unresolved-kernel-stack]\n'
         printf '#   §2 用户态 (server) — 本程序符号，含 All + Self\n'
         printf '#\n'
         printf '# §1 口径: Overhead = 该边界符号样本数 / 全部 perf 样本数\n'
