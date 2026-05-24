@@ -60,7 +60,8 @@ usage() {
 
 说明:
   - 一设计版本一份产物：benchmark_log/artifacts/{版本}_wrk.txt 等
-  - 产物已存在时将提示 [y/N] 确认覆盖；确认后 **先删除** 将被覆盖的旧文件（含 perf.data），再重新生成
+  - 产物已存在时将提示 [y/N] 确认覆盖；确认后先删除旧文件（含 perf.data）再重新生成
+  - report: flat 符号表（Overhead≥0.1%，一行一符号；调用链见 SVG）
   - 记录文档: benchmark_log/{版本}_{YYYYMMDD}_bench.md（按 TEMPLATE 填写 wrk + perf）
 
 环境变量: BUILD_DIR, BUILD_JOBS, FLAMEGRAPH_DIR, ARTIFACTS_DIR, SERVER_LOG, PERF_REPORT_PERCENT_LIMIT, PERF_BENCH_FORCE
@@ -286,9 +287,60 @@ generate_flamegraph() {
     log "火焰图: $svg ($(wc -c <"$svg" | tr -d ' ') bytes)"
 }
 
+# 判断 perf report 是否为 flat 符号表（非 Children/Self 调用树）
+is_flat_symbol_report() {
+    local file="$1"
+    [[ -f "$file" ]] || return 1
+    if grep -qE '^# Children[[:space:]]+Self' "$file"; then
+        return 1
+    fi
+    if grep -qE '^[[:space:]]+\|' "$file"; then
+        return 1
+    fi
+    if ! grep -qE '^# Overhead[[:space:]]' "$file"; then
+        return 1
+    fi
+    return 0
+}
+
+# 写入 flat 符号表；失败时尝试多种 perf 参数组合
+write_flat_symbol_report() {
+    local data="$1" limit="$2" dest="$3"
+    local tmp tried=0
+    tmp="$(mktemp "${dest}.XXXXXX")"
+
+    # shellcheck disable=SC2086
+    _try_report() {
+        local label="$1"
+        shift
+        tried=$((tried + 1))
+        log "  尝试 flat 符号表 (${label}) ..."
+        if ! perf_cmd report -i "$data" "$@" >"$tmp" 2>/dev/null; then
+            return 1
+        fi
+        is_flat_symbol_report "$tmp"
+    }
+
+    if _try_report "call-graph none" \
+        --stdio --sort comm,dso,symbol --percent-limit "$limit" --call-graph none; then
+        :
+    elif _try_report "-g none" \
+        --stdio --sort comm,dso,symbol --percent-limit "$limit" -g none; then
+        :
+    elif _try_report "no-children + call-graph none" \
+        --stdio --sort comm,dso,symbol --percent-limit "$limit" --no-children --call-graph none; then
+        :
+    else
+        rm -f "$tmp"
+        die "无法生成 flat 符号表（已尝试 ${tried} 种 perf report 参数）。请检查 perf 版本；手动: perf report -i <data> --stdio --sort comm,dso,symbol --percent-limit ${limit} --call-graph none"
+    fi
+
+    mv "$tmp" "$dest"
+}
+
 generate_report() {
     local data="$1"
-    local base report limit
+    local base report limit lines
     base="$(artifact_base)"
     report="$ARTIFACTS_DIR/${base}_perf_report.txt"
     limit="$PERF_REPORT_PERCENT_LIMIT"
@@ -297,11 +349,20 @@ generate_report() {
         printf '# mini_web_server perf 符号表\n'
         printf '# 版本: %s\n' "$base"
         printf '# 过滤: Overhead >= %s%%（--percent-limit %s）\n' "$limit" "$limit"
-        printf '# 用途: 按 %% 从高到低找 CPU 瓶颈；调用链见 %s_flamegraph.svg\n' "$base"
+        printf '# 格式: flat（--call-graph none；表头应为 Overhead / Command / Shared Object / Symbol）\n'
+        printf '# 阅读: 按 Overhead 降序；Command=进程，Shared Object=二进制；[k] 为内核\n'
+        printf '#       用户态优先看 Shared Object=server 的行；invoke/lambda 多为 std::function 间接调用\n'
+        printf '# 调用链: 见 %s_flamegraph.svg（勿在本文件找 |--- 树）\n' "$base"
         printf '# 原始: %s\n#\n' "$(basename "$data")"
-        perf_cmd report -i "$data" --stdio --sort symbol --percent-limit "$limit"
     } >"$report"
-    log "符号表: $report ($(wc -l <"$report" | tr -d ' ') 行)"
+    write_flat_symbol_report "$data" "$limit" "${report}.body"
+    cat "${report}.body" >>"$report"
+    rm -f "${report}.body"
+    lines="$(wc -l <"$report" | tr -d ' ')"
+    if [[ "$lines" -gt 2000 ]]; then
+        warn "符号表行数偏多 (${lines})；若仍含调用树请升级脚本或设 PERF_REPORT_PERCENT_LIMIT=0.2"
+    fi
+    log "符号表: $report (${lines} 行)"
 }
 
 cmd_check() {

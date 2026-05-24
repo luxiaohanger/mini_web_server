@@ -109,7 +109,7 @@ bash scripts/perf_bench.sh -v v10.0
 | 构建类型 | RelWithDebInfo |
 | 并发 wrk | `wrk -t2 -c20 -d30s http://127.0.0.1:8888/` |
 | 采样时长 | 30s |
-| 符号表 | `benchmark_log/artifacts/{版本}_perf_report.txt`（Overhead ≥ 0.1%） |
+| 符号表 | `benchmark_log/artifacts/{版本}_perf_report.txt`（flat，Overhead ≥ 0.1%） |
 | 火焰图 | `benchmark_log/artifacts/{版本}_flamegraph.svg` |
 | perf.data | `benchmark_log/artifacts/{版本}_perf.data` |
 
@@ -121,7 +121,7 @@ bash scripts/perf_bench.sh -v v10.0
 
 ### 5.4 热点摘要
 
-> 先读符号表 Overhead 前几名，再在火焰图 Search 对应符号确认调用链。
+> 符号表须为 flat（表头 `Overhead / Command / Shared Object / Symbol`）；`head -40` 后填 §5.4。调用链看火焰图。
 
 | 占比（约） | 符号 / 函数 | 说明 |
 |------------|-------------|------|
