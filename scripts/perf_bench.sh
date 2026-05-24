@@ -57,7 +57,7 @@ usage() {
   PERF_REPORT_PERCENT_LIMIT  符号表阈值 %（默认 0.1）
   PERF_BENCH_FORCE=1           跳过覆盖确认
 
-符号表: 分层（§1 用户发起→内核类别 + §2 server All/Self）；调用链见 SVG。
+符号表: 分层（§1 系统调用 Wrapper/Direct + §2 server All/Self）；调用链见 SVG。
 详情: scripts/SCRIPTS.md
 
 示例:
@@ -450,7 +450,7 @@ append_kernel_initiator_table() {
 
     if ! perf_script_with_stacks "$data" "$tmp"; then
         rm -f "$tmp" "$folded" "$sc_err"
-        die "perf script (§1 用户→内核) 失败"
+        die "perf script (§1 系统调用) 失败"
     fi
 
     if ! stackcollapse-perf.pl --kernel <"$tmp" >"$folded" 2>"$sc_err"; then
@@ -460,8 +460,7 @@ append_kernel_initiator_table() {
     fi
     rm -f "$sc_err" "$tmp"
 
-    # §1：每条样本栈 — 找最靠 syscall 的 server 发起帧 + syscall 类别（read/write/epoll/futex…）
-    # 栈序与火焰图一致：左=root caller，右=leaf（采样点）
+    # §1：Wrapper（项目封装 poll/updateChannel…）× API（源码 write/readv/epoll_wait/mutex…）
     awk -v limit="$limit" '
     function strip_frame(name) {
         sub(/_\[k\]$/, "", name)
@@ -476,114 +475,207 @@ append_kernel_initiator_table() {
         }
         return 0
     }
-    function is_syscall_entry(sym) {
-        return (sym ~ /^__x64_sys_/ || sym ~ /^__arm64_sys_/ || sym ~ /^__se_sys_/ \
-            || sym ~ /^__do_sys_/ || sym ~ /^__do_compat_sys_/)
+    function first_kernel_idx(frames, n,    i) {
+        for (i = 1; i <= n; i++) {
+            if (frames[i] ~ /_\[k\]$/) {
+                return i
+            }
+        }
+        return 0
     }
-    function is_server_frame(sym) {
+    function normalize_api(sym,    s) {
+        s = sym
+        sub(/^__GI_/, "", s)
+        sub(/^__libc_/, "", s)
+        sub(/@.*$/, "", s)
+        if (s ~ /^pthread_mutex|^pthread_cond|^__lll_lock|^__pthread_mutex/) {
+            return "mutex"
+        }
+        if (s ~ /epoll_wait/) {
+            return "epoll_wait"
+        }
+        if (s ~ /epoll_ctl/) {
+            return "epoll_ctl"
+        }
+        if (s ~ /epoll_create1/) {
+            return "epoll_create"
+        }
+        if (s ~ /epoll_create/) {
+            return "epoll_create"
+        }
+        if (s ~ /timerfd_create/) {
+            return "timerfd_create"
+        }
+        if (s ~ /eventfd2?/) {
+            return "eventfd"
+        }
+        if (s ~ /^readv/) {
+            return "readv"
+        }
+        if (s ~ /^writev/) {
+            return "writev"
+        }
+        if (s ~ /^read$/) {
+            return "read"
+        }
+        if (s ~ /^write$/) {
+            return "write"
+        }
+        if (s ~ /accept4/) {
+            return "accept"
+        }
+        if (s ~ /accept/) {
+            return "accept"
+        }
+        if (s ~ /^close/) {
+            return "close"
+        }
+        if (s ~ /^fcntl/) {
+            return "fcntl"
+        }
+        if (s ~ /clock_gettime/) {
+            return "clock_gettime"
+        }
+        return ""
+    }
+    function api_from_kernel_entry(sym,    s) {
+        s = sym
+        sub(/^__x64_sys_/, "", s)
+        sub(/^__arm64_sys_/, "", s)
+        sub(/^__se_sys_/, "", s)
+        sub(/^__do_sys_/, "", s)
+        sub(/^__do_compat_sys_/, "", s)
+        if (s ~ /^futex/) {
+            return "mutex"
+        }
+        if (s ~ /^newfstatat|^fstat/) {
+            return "fstat"
+        }
+        if (s ~ /^epoll_create/) {
+            return "epoll_create"
+        }
+        return s
+    }
+    function find_api(frames, n,    i, sym, api, kidx) {
+        kidx = first_kernel_idx(frames, n)
+        if (kidx > 1) {
+            for (i = kidx - 1; i >= 1; i--) {
+                if (frames[i] ~ /_\[k\]$/) {
+                    continue
+                }
+                sym = strip_frame(frames[i])
+                api = normalize_api(sym)
+                if (api != "") {
+                    return api SUBSEP i
+                }
+            }
+        }
+        for (i = 1; i <= n; i++) {
+            if (frames[i] !~ /_\[k\]$/) {
+                continue
+            }
+            sym = strip_frame(frames[i])
+            if (sym ~ /^__x64_sys_|^__arm64_sys_|^__se_sys_|^__do_sys_|^__do_compat_sys_/) {
+                api = api_from_kernel_entry(sym)
+                if (api != "") {
+                    return api SUBSEP (i - 1)
+                }
+            }
+        }
+        return SUBSEP 0
+    }
+    function wrapper_from_symbol(sym) {
+        if (sym ~ /Epoll::poll$/) {
+            return "Epoll::poll"
+        }
+        if (sym ~ /Epoll::updateChannel/) {
+            return "Epoll::updateChannel"
+        }
+        if (sym ~ /Epoll::removeChannel/) {
+            return "Epoll::removeChannel"
+        }
+        if (sym ~ /Epoll::Epoll/) {
+            return "Epoll::Epoll"
+        }
+        if (sym ~ /Buffer::sckToBuffer/) {
+            return "Buffer::sckToBuffer"
+        }
+        if (sym ~ /Buffer::bufferToSck/) {
+            return "Buffer::bufferToSck"
+        }
+        if (sym ~ /Socket::sckWrite/) {
+            return "Socket::sckWrite"
+        }
+        if (sym ~ /Connection::readFromSck/) {
+            return "Connection::readFromSck"
+        }
+        if (sym ~ /Connection::sendHttpOnLoop/) {
+            return "Connection::sendHttpOnLoop"
+        }
+        if (sym ~ /Connection::trySendToSck/) {
+            return "Connection::trySendToSck"
+        }
+        if (sym ~ /EventLoop::readCallback/) {
+            return "EventLoop::readCallback"
+        }
+        if (sym ~ /EventLoop::enqueueTask/) {
+            return "EventLoop::enqueueTask"
+        }
+        if (sym ~ /TimerQueue::handleRead/) {
+            return "TimerQueue::handleRead"
+        }
+        if (sym ~ /TimerQueue::TimerQueue/) {
+            return "TimerQueue::TimerQueue"
+        }
+        if (sym ~ /ThreadPool::enqueue/) {
+            return "ThreadPool::enqueue"
+        }
+        if (sym ~ /Socket::acceptConnection/) {
+            return "Socket::acceptConnection"
+        }
+        if (sym ~ /Acceptor::/) {
+            return "Acceptor::handleRead"
+        }
+        if (sym ~ /EventLoop::loop$/) {
+            return "EventLoop::loop"
+        }
+        return ""
+    }
+    function is_server_symbol(sym) {
         if (sym ~ /_\[k\]$/) {
             return 0
         }
         if (sym ~ /^__GI_/ || sym ~ /^__libc_/ || sym ~ /^pthread_/ || sym ~ /^std::/) {
             return 0
         }
-        if (sym ~ /^read$|^write$|^readv$|^writev$|^close$|^ioctl$/) {
+        if (normalize_api(sym) != "") {
             return 0
         }
-        if (sym ~ /::/) {
-            return 1
-        }
-        if (sym ~ /^(Connection|EventLoop|Buffer|Epoll|TimerQueue|ThreadPool|Socket|Channel|HttpProcess|Acceptor|MainReactor|SubReactor|Server|Timer)/) {
-            return 1
-        }
-        return 0
+        return (sym ~ /::/ || sym ~ /^(Connection|EventLoop|Buffer|Epoll|TimerQueue|ThreadPool|Socket|Channel|HttpProcess|Acceptor|MainReactor|SubReactor|Server|Timer)/)
     }
-    function find_syscall(frames, n,    i, sym) {
-        for (i = 1; i <= n; i++) {
-            if (frames[i] !~ /_\[k\]$/) {
+    function find_wrapper(frames, n, api_idx,    j, sym, w, fallback, start) {
+        fallback = ""
+        start = api_idx + 0
+        if (start < 1) {
+            start = n
+        }
+        for (j = start; j >= 1; j--) {
+            if (frames[j] ~ /_\[k\]$/) {
                 continue
             }
-            sym = strip_frame(frames[i])
-            if (is_syscall_entry(sym)) {
-                return sym SUBSEP i
-            }
-        }
-        for (i = n; i >= 1; i--) {
-            if (frames[i] !~ /_\[k\]$/) {
-                continue
-            }
-            sym = strip_frame(frames[i])
-            if (is_syscall_entry(sym)) {
-                return sym SUBSEP i
-            }
-        }
-        return SUBSEP 0
-    }
-    function find_initiator(frames, sc_idx,    j, sym) {
-        for (j = sc_idx - 1; j >= 1; j--) {
             sym = strip_frame(frames[j])
-            if (is_server_frame(sym)) {
-                return sym
+            w = wrapper_from_symbol(sym)
+            if (w != "") {
+                return w
+            }
+            if (is_server_symbol(sym) && fallback == "") {
+                fallback = sym
             }
         }
-        return ""
-    }
-    function syscall_category(sc_sym,    s) {
-        s = sc_sym
-        sub(/^__x64_sys_/, "", s)
-        sub(/^__arm64_sys_/, "", s)
-        sub(/^__se_sys_/, "", s)
-        sub(/^__do_sys_/, "", s)
-        sub(/^__do_compat_sys_/, "", s)
-        if (s ~ /^readv/) {
-            return "readv"
+        if (fallback != "") {
+            return fallback
         }
-        if (s ~ /^read$/) {
-            return "read"
-        }
-        if (s ~ /^write$|^pwrite/) {
-            return "write"
-        }
-        if (s ~ /^epoll_wait|^epoll_pwait/) {
-            return "epoll"
-        }
-        if (s ~ /^futex/) {
-            return "futex"
-        }
-        if (s ~ /^accept4?$/) {
-            return "accept"
-        }
-        if (s ~ /^sendmsg|^sendto|^send/) {
-            return "send"
-        }
-        if (s ~ /^recvmsg|^recvfrom|^recv/) {
-            return "recv"
-        }
-        if (s ~ /^ppoll|^poll/) {
-            return "poll"
-        }
-        if (s ~ /^ioctl/) {
-            return "ioctl"
-        }
-        if (s ~ /^clock_gettime/) {
-            return "clock"
-        }
-        if (s ~ /^close/) {
-            return "close"
-        }
-        if (s ~ /^setsockopt|^getsockopt/) {
-            return "sockopt"
-        }
-        return s
-    }
-    function find_user_sync(frames, n, sc_idx,    j, sym) {
-        for (j = (sc_idx > 0 ? sc_idx - 1 : n); j >= 1; j--) {
-            sym = strip_frame(frames[j])
-            if (sym ~ /^pthread_mutex|^pthread_cond|^__lll_lock|^__pthread_mutex/) {
-                return "futex"
-            }
-        }
-        return ""
+        return "[unknown-wrapper]"
     }
     function sort_order(pct, order, nout,    i, j, t) {
         for (i = 1; i <= nout; i++) {
@@ -605,76 +697,102 @@ append_kernel_initiator_table() {
             pure_user += wt
             next
         }
-        sc_pair = find_syscall(frames, n)
-        split(sc_pair, sc_parts, SUBSEP)
-        sc_sym = sc_parts[1]
-        sc_idx = sc_parts[2] + 0
-        category = ""
-        if (sc_sym != "") {
-            category = syscall_category(sc_sym)
-        } else {
-            category = find_user_sync(frames, n, sc_idx)
-        }
-        if (category == "") {
-            unpaired_kernel += wt
+        apair = find_api(frames, n)
+        split(apair, aparts, SUBSEP)
+        api = aparts[1]
+        api_idx = aparts[2] + 0
+        if (api == "") {
+            no_api += wt
+            orphan_wrap = find_wrapper(frames, n, 0)
+            orphan_wt[orphan_wrap] += wt
             next
         }
-        initiator = find_initiator(frames, sc_idx)
-        if (initiator == "") {
-            initiator = "[no-server-frame]"
-        }
-        detail_key = initiator SUBSEP category
-        detail_wt[detail_key] += wt
-        cat_wt[category] += wt
+        wrapper = find_wrapper(frames, n, api_idx)
+        pair_key = wrapper SUBSEP api
+        pair_wt[pair_key] += wt
+        api_wt[api] += wt
+        wrap_wt[wrapper] += wt
     }
     END {
         if (total_samples == 0) {
             print "# (无调用栈样本；检查 perf.data 是否含 call-graph)"
             exit
         }
-        printf "# Overhead  Category  Initiator (server)\n"
-        nd = 0
-        for (k in detail_wt) {
-            split(k, parts, SUBSEP)
-            pct_d[k] = detail_wt[k] * 100.0 / total_samples
-            if (pct_d[k] + 0 >= limit + 0) {
-                detail_cat[k] = parts[2]
-                detail_init[k] = parts[1]
-                order_d[++nd] = k
+        printf "# Overhead  API           Wrapper\n"
+        np = 0
+        for (k in pair_wt) {
+            pct_p[k] = pair_wt[k] * 100.0 / total_samples
+            if (pct_p[k] + 0 >= limit + 0) {
+                split(k, pp, SUBSEP)
+                pair_wrap[k] = pp[1]
+                pair_api[k] = pp[2]
+                order_p[++np] = k
             }
         }
-        sort_order(pct_d, order_d, nd)
-        if (nd == 0) {
-            print "# (无达到阈值的 发起函数→类别 配对；见下方汇总与脚注)"
+        sort_order(pct_p, order_p, np)
+        if (np == 0) {
+            print "# (无达到阈值的 Wrapper×API 配对；见下方汇总)"
         } else {
-            for (i = 1; i <= nd; i++) {
-                k = order_d[i]
-                printf " %7.2f%%  %-8s  %s\n", pct_d[k], detail_cat[k], detail_init[k]
+            for (i = 1; i <= np; i++) {
+                k = order_p[i]
+                printf " %7.2f%%  %-12s  %s\n", pct_p[k], pair_api[k], pair_wrap[k]
             }
         }
-        printf "#\n# --- 按类别合并（read / write / epoll / futex …）---\n"
-        printf "# Overhead  Category\n"
-        nc = 0
-        for (c in cat_wt) {
-            pct_c[c] = cat_wt[c] * 100.0 / total_samples
-            if (pct_c[c] + 0 >= limit + 0) {
-                order_c[++nc] = c
+        printf "#\n# --- 按 API 合并（write / readv / epoll_wait …）---\n"
+        printf "# Overhead  API\n"
+        na = 0
+        for (a in api_wt) {
+            pct_a[a] = api_wt[a] * 100.0 / total_samples
+            if (pct_a[a] + 0 >= limit + 0) {
+                order_a[++na] = a
             }
         }
-        sort_order(pct_c, order_c, nc)
-        for (i = 1; i <= nc; i++) {
-            c = order_c[i]
-            printf " %7.2f%%  %s\n", pct_c[c], c
+        sort_order(pct_a, order_a, na)
+        for (i = 1; i <= na; i++) {
+            a = order_a[i]
+            printf " %7.2f%%  %s\n", pct_a[a], a
+        }
+        printf "#\n# --- 按 Wrapper 合并（poll / updateChannel / sckToBuffer …）---\n"
+        printf "# Overhead  Wrapper\n"
+        nw = 0
+        for (w in wrap_wt) {
+            pct_w[w] = wrap_wt[w] * 100.0 / total_samples
+            if (pct_w[w] + 0 >= limit + 0) {
+                order_w[++nw] = w
+            }
+        }
+        sort_order(pct_w, order_w, nw)
+        for (i = 1; i <= nw; i++) {
+            w = order_w[i]
+            printf " %7.2f%%  %s\n", pct_w[w], w
+        }
+        if (no_api + 0 > 0) {
+            printf "#\n# --- 未识别 API（按 Wrapper 汇总）---\n"
+            printf "# Overhead  Wrapper\n"
+            nu = 0
+            for (w in orphan_wt) {
+                pct_u[w] = orphan_wt[w] * 100.0 / total_samples
+                if (pct_u[w] + 0 >= limit + 0) {
+                    order_u[++nu] = w
+                }
+            }
+            sort_order(pct_u, order_u, nu)
+            for (i = 1; i <= nu; i++) {
+                w = order_u[i]
+                printf " %7.2f%%  %s\n", pct_u[w], w
+            }
+            if (nu == 0) {
+                for (w in orphan_wt) {
+                    printf " %7.2f%%  %s\n", orphan_wt[w] * 100.0 / total_samples, w
+                }
+            }
+            printf "# 未识别 API 合计: %.2f%%\n", no_api * 100.0 / total_samples
         }
         printf "#\n"
         if (pure_user + 0 > 0) {
             printf "# 纯用户态（栈无内核帧）: %.2f%%\n", pure_user * 100.0 / total_samples
         }
-        if (unpaired_kernel + 0 > 0) {
-            printf "# 未配对（有内核帧但无 syscall/同步类别）: %.2f%%\n", \
-                unpaired_kernel * 100.0 / total_samples
-        }
-        printf "# 说明: read 含 eventfd/timerfd 的 read(2)；write 含 socket 写与 eventfd 唤醒；futex 含 mutex/cv\n"
+        printf "# 说明: API=程序员接口(write/read/epoll_wait/mutex…)；Wrapper=项目封装；不看内核/glibc 实现\n"
     }
     ' "$folded" >>"$report"
     rm -f "$folded"
@@ -702,26 +820,25 @@ generate_report() {
     base="$(artifact_base)"
     report="$ARTIFACTS_DIR/${base}_perf_report.txt"
     limit="$PERF_REPORT_PERCENT_LIMIT"
-    log "perf 符号表 → $report（分层：§1 用户→内核类别 + §2 server，≥ ${limit}%）"
+    log "perf 符号表 → $report（分层：§1 系统调用 + §2 server，≥ ${limit}%）"
     {
         printf '# mini_web_server perf 符号表（分层摘要）\n'
         printf '# 版本: %s\n' "$base"
         printf '#\n'
         printf '# 结构:\n'
-        printf '#   §1 内核态 — 按 server 发起函数 → 类别（read/write/readv/epoll/futex…）配对统计\n'
-        printf '#            同火焰图栈（perf script + stackcollapse --kernel）；分母=全部 perf 样本\n'
-        printf '#            明细表 + 「按类别合并」；纯用户态/未配对见 §1 脚注\n'
+        printf '#   §1 系统调用 — Wrapper（Epoll::poll…）× API（write/readv/epoll_wait/mutex…）\n'
+        printf '#            仅程序员可见接口；不解析内核/glibc 实现细节\n'
         printf '#   §2 用户态 (server) — 本程序符号，含 All + Self\n'
         printf '#\n'
-        printf '# §1 口径: Overhead = 该配对样本数 / 全部 perf 样本数（每样本只归一条发起→类别）\n'
-        printf '# §2 口径: 全量 inclusive 后筛 server 行（不用 --dsos）；All/Overhead 分母为全部样本\n'
-        printf '#   All  = 含子函数 + 内核/ libc 路径的总占比（排序依据；perf 原始列名 Children）\n'
-        printf '#   Self = 仅 PC 落在该函数 server 体内（参考）；勿把 Self+All 相加\n'
+        printf '# §1 口径: Overhead = 该配对样本数 / 全部 perf 样本数\n'
+        printf '# §2 口径: 全量 inclusive 后筛 server 行；All/Overhead 分母为全部样本\n'
+        printf '#   All  = 含子函数 + 内核/ libc 路径的总占比（排序依据）\n'
+        printf '#   Self = 仅 PC 落在该函数 server 体内（参考）\n'
         printf '# 过滤: >= %s%%  |  -g none（§2 无 |--- 调用树）\n' "$limit"
         printf '# 调用链: %s_flamegraph.svg\n' "$base"
         printf '# 原始: %s\n#\n' "$(basename "$data")"
-        printf '# === §1 内核态（用户发起函数 → 类别） ===\n'
-        printf '# 方法: 栈上最靠 syscall 的 server 帧 + __x64_sys_* 归类；read 含 eventfd/timerfd\n#\n'
+        printf '# === §1 Wrapper × API（项目封装 → 程序员接口） ===\n'
+        printf '# 例: Epoll::poll→epoll_wait  Buffer::sckToBuffer→readv  enqueueTask→write  enqueue→mutex\n#\n'
     } >"$report"
     append_kernel_initiator_table "$data" "$limit" "$report"
     {
@@ -828,7 +945,7 @@ cmd_run() {
     log "完成 → $ARTIFACTS_DIR"
     log "  wrk:        ${base}_wrk.txt"
     log "  perf.data:  ${base}_perf.data"
-    log "  report:     ${base}_perf_report.txt（§1 用户→内核 + §2 server，≥${PERF_REPORT_PERCENT_LIMIT}%）"
+    log "  report:     ${base}_perf_report.txt（§1 系统调用 + §2 server，≥${PERF_REPORT_PERCENT_LIMIT}%）"
     log "  flamegraph: ${base}_flamegraph.svg（调用链）"
     log "请更新或新建 benchmark_log/${DESIGN_VER}_YYYYMMDD_bench.md（wrk + perf 同一份）"
 

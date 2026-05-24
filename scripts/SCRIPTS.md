@@ -267,24 +267,22 @@ BUILD_JOBS=2 bash scripts/perf_bench.sh -v v10.0
 |------|------|------|
 | `{版本}_wrk.txt` | 与 perf 同跑的 wrk 输出（仅写入文件） | 否 |
 | `{版本}_perf.data` | perf 原始采样 | 否 |
-| `{版本}_perf_report.txt` | **分层符号表**（§1 用户发起→内核类别 + §2 server All/Self） | 否 |
+| `{版本}_perf_report.txt` | **分层符号表**（§1 Wrapper×API + §2 server All/Self） | 否 |
 | `{版本}_flamegraph.svg` | 火焰图（调用链） | 否 |
 
 **符号表生成（脚本内置，勿改口径）：**
 
 | 段落 | 方法 |
 |------|------|
-| **§1 内核态** | 同火焰图栈 → **server 发起函数 + syscall 类别**（read/write/readv/epoll/futex…）配对；附类别合并表 |
-| **§2 用户态** | `perf report --sort comm,dso,symbol -g none` 全量 inclusive → 筛 `Shared Object=server` |
+| **§1** | 栈上 **API**（write/epoll_wait/mutex…）+ **Wrapper**（Epoll::poll/updateChannel…）；不看内核实现 |
+| **§2 用户态** | `perf report` 全量 inclusive → 筛 `Shared Object=server` |
 
 | 要点 | 说明 |
 |------|------|
-| **§1 明细** | `Initiator → Category`，如 `Buffer::sckToBuffer → readv`、`EventLoop::readCallback → read` |
-| **§1 合并** | 同类 syscall 加总（read/write/epoll/futex…）；read 含 eventfd/timerfd，靠发起函数区分 |
-| **§2 inclusive** | **不用** `--no-children`；报告表头 **All**（perf 原始列名 Children）；旧版仅 Overhead 时语义同 All |
-| **§2 flat** | **`-g none`** → 无 `\|---` 树 |
-| **§2 读列** | **All** = 含子函数 **及内核/libc 路径**（排序依据）；**Self** = 仅 server 函数体内；分母均为全部 perf 样本 |
-| **读法** | §1 看哪段代码触发哪类内核调用；§2 按 All 定 src 优先级；调用链看 SVG |
+| **§1 明细** | `API + Wrapper`，如 `epoll_wait + Epoll::poll`、`write + EventLoop::enqueueTask` |
+| **§1 合并** | 按 API 汇总、按 Wrapper 汇总 |
+| **§2 读列** | **All** 排序；**Self** 参考 |
+| **读法** | §1 看程序员可见的 syscall 触发点；§2 定 src 优先级；调用链看 SVG |
 
 结论写入 `benchmark_log/{版本}_{YYYYMMDD}_bench.md` §5（模板见 `benchmark_log/TEMPLATE.md`）。
 

@@ -223,28 +223,23 @@ mkdir -p benchmark_log/artifacts
 |------|------|
 | `{版本}_wrk.txt` | 同跑 wrk 输出（**RPS 不作版本验收**） |
 | `{版本}_perf.data` | perf 原始数据 |
-| `{版本}_perf_report.txt` | **分层符号表**（§1 用户发起→内核类别 + §2 server All/Self，≥ 0.1%） |
+| `{版本}_perf_report.txt` | **分层符号表**（§1 Wrapper×API + §2 server All/Self，≥ 0.1%） |
 | `{版本}_flamegraph.svg` | **火焰图**（调用链，浏览器打开） |
 
-> 符号表：**两层** — §1 按 **server 发起函数 → 内核类别**（read/write/readv/epoll/futex…）配对 + 类别合并；§2 server 用户态（`perf report` inclusive，看 **All** 列）。
+> 符号表：**两层** — §1 **Wrapper × API**（`Epoll::poll→epoll_wait`、`Buffer::bufferToSck→write`）；§2 server（看 **All**）。
 
 ### 读 perf 产物（符号表 + 火焰图）
 
-两份文件来自同一份 `perf.data`，分工阅读：
-
 | 产物 | 回答的问题 | 怎么用 |
 |------|------------|--------|
-| **`_perf_report.txt` 符号表** | 哪段 server 代码触发了哪类内核调用；用户态哪些函数最热 | §1 看 **发起函数→类别** 与 **类别合并**；§2 按 **All** 排序 |
-| **`_flamegraph.svg` 火焰图** | 调用链：热点从哪条路径来、如何分叉 | 浏览器打开；Search 符号名；点宽条放大子树 |
+| **`_perf_report.txt` 符号表** | 哪个封装调用了哪个 API；纯业务 CPU | §1 看 **API + Wrapper**；§2 按 **All** |
+| **`_flamegraph.svg` 火焰图** | 调用链 | 浏览器 Search |
 
-**符号表（分层）**
+**§1 Wrapper × API**
 
-- **§1 内核态（用户发起 → 类别）**：与火焰图 **同源栈**（`perf script` + `stackcollapse --kernel`）。对每条样本栈：
-  - 找最靠 syscall 的 **server 发起帧**（如 `Buffer::sckToBuffer`、`EventLoop::readCallback`）；
-  - 将 **`__x64_sys_*`** 归入 **read / write / readv / epoll / futex / accept …**；
-  - **明细表**：`Overhead  Category  Initiator`；**合并表**：同类 syscall 加总。
-  - **read** 含 eventfd、timerfd（靠发起函数区分）；**write** 含 socket 写与 eventfd 唤醒；**futex** 含 mutex/cv。
-  - 脚注：**纯用户态**、**未配对** 占比；分母均为全部 perf 样本。
+- **API**：程序员写的接口 — `write`、`read`、`readv`、`epoll_wait`、`epoll_ctl`、`mutex`…（不是内核符号）
+- **Wrapper**：项目封装 — `Epoll::poll`、`Epoll::updateChannel`、`Buffer::sckToBuffer`…
+- 主表两列对应关系；同一 `write` 可拆到 `bufferToSck` 与 `enqueueTask`
 - **§2 用户态 (server)**：`perf report --sort comm,dso,symbol -g none` **全量 inclusive** 后筛 `Shared Object=server`（**不用** `--dsos=server`，避免 All 不含内核路径）。
 - **§2 表头**：报告内精简为 **`All / Self / Symbol` 三列**（脚本去掉 perf IPC 宽表与点线分隔）；perf 原始列名 Children 归一为 All。
 - **All 与 Self**（§2，分母均为 **全部 perf 样本**）：
@@ -263,7 +258,7 @@ mkdir -p benchmark_log/artifacts
 
 **推荐流程（定方向 → 落方案）**
 
-1. 符号表：§1 **发起函数→类别** 与类别合并 → §2 server 按 **All** 排序。
+1. 符号表：§1 **Wrapper×API** → §2 按 **All** 排序。
 2. 火焰图：对 §2 前几名 Search，确认从 `EventLoop::loop` 等根上的调用分支。
 3. 将结论写入该版本报告 §5.4「热点摘要」；§5.5 可粘贴符号表前几行或火焰图关键路径文字。
 4. wrk RPS 仍以报告 §4 为准；perf 只说明 CPU 花在哪，不代替版本验收。
