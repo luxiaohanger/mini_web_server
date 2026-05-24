@@ -30,41 +30,41 @@ usage() {
     cat <<'EOF'
 用法: bash scripts/perf_bench.sh [选项] [子命令]
 
-一条命令全自动（默认 run）:
-  停 server → 删除 build/ → RelWithDebInfo 重编 → 起 server → wrk+perf → 符号表 + SVG
-
-子命令:
-  run          完整流程（默认）
-  flamegraph   仅从已有 perf.data 生成 SVG + 符号表 report
-  check        检查依赖与当前二进制符号（不重编）
+子命令（默认 run）:
+  run          停 server → 删 build → RelWithDebInfo 重编 → wrk+perf → 符号表 + SVG
+  flamegraph   仅从已有 perf.data 生成符号表 + SVG（不重编、不重采样）
+  check        检查依赖、server 调试符号、FlameGraph（不采样）
 
 选项:
-  -v <版本>    设计版本（**必填**，run / flamegraph），如 v10.0
-  -d <秒>      wrk 与 perf 时长（默认 30）
-  -t / -c      wrk 线程 / 连接数（默认 2 / 20）
-  -u <url>     wrk URL（默认 http://127.0.0.1:8888/）
-  -i <file>    perf.data 路径（flamegraph 子命令，默认 artifacts/{版本}_perf.data）
-  -j <N>       cmake --build 并行数（默认 nproc）
-  --skip-build 跳过删 build 与重编
-  --fp         perf 用帧指针 -g（默认 dwarf）
-  --no-warmup  跳过 wrk 5s 热身
+  -v <版本>      设计版本（run/flamegraph 必填），如 v10.0
+  -d <秒>        wrk 与 perf 时长（默认 30）
+  -t / -c        wrk 线程数 / 连接数（默认 2 / 20）
+  -u <url>       wrk URL（默认 http://127.0.0.1:8888/）
+  -i <file>      perf.data 路径（flamegraph；默认 artifacts/{版本}_perf.data）
+  -j <N>         cmake --build 并行数（默认 nproc）
+  --skip-build   跳过重编（仍 wrk+perf 或 flamegraph）
+  --fp           perf 栈展开用帧指针 -g（默认 dwarf）
+  --no-warmup    跳过 wrk 5s 热身
   --stop-server  结束后 SIGTERM 停 server
-  --skip-wrk   只 perf，不跑 wrk
-  -h, --help
+  --skip-wrk     只 perf record，不跑 wrk
+  -h, --help     本帮助
+
+环境变量:
+  BUILD_DIR                  构建目录（默认 build/）
+  ARTIFACTS_DIR              产物目录（默认 benchmark_log/artifacts）
+  FLAMEGRAPH_DIR             FlameGraph 路径（默认 ~/FlameGraph）
+  SERVER_LOG                 server 日志（默认 /tmp/server.log）
+  PERF_REPORT_PERCENT_LIMIT  符号表阈值 %（默认 0.1）
+  PERF_BENCH_FORCE=1           跳过覆盖确认
+
+符号表: inclusive flat（-g none，Overhead 含子函数）；调用链见 SVG。
+详情: scripts/SCRIPTS.md
 
 示例:
   bash scripts/perf_bench.sh -v v10.0
   bash scripts/perf_bench.sh --skip-build -v v10.0
-  bash scripts/perf_bench.sh check
   bash scripts/perf_bench.sh flamegraph -v v10.0
-
-说明:
-  - 一设计版本一份产物：benchmark_log/artifacts/{版本}_wrk.txt 等
-  - 产物已存在时将提示 [y/N] 确认覆盖；确认后先删除旧文件（含 perf.data）再重新生成
-  - report: flat inclusive 符号表（Overhead 含子函数；调用链见 SVG）
-  - 记录文档: benchmark_log/{版本}_{YYYYMMDD}_bench.md（按 TEMPLATE 填写 wrk + perf）
-
-环境变量: BUILD_DIR, BUILD_JOBS, FLAMEGRAPH_DIR, ARTIFACTS_DIR, SERVER_LOG, PERF_REPORT_PERCENT_LIMIT, PERF_BENCH_FORCE
+  bash scripts/perf_bench.sh check
 EOF
 }
 

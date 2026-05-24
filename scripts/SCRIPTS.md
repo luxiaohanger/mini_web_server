@@ -1,5 +1,13 @@
 # 运行脚本说明
 
+| 章节 | 内容 |
+|------|------|
+| [多终端启动](#多终端启动) | tmux、client、curl |
+| [client 参数](#client-参数) | `-n` / `-t` 验收 |
+| [停止](#停止) | 停 server |
+| [perf_bench.sh](#perf-自动测试perf_benchsh) | **子命令、选项、环境变量、产物** |
+| [常见问题](#常见问题) | client / 编译 |
+
 ---
 
 ## 前置条件（构建）
@@ -174,45 +182,132 @@ echo "exit code: $?"
 
 ## perf 自动测试（`perf_bench.sh`）
 
-**须指定设计版本 `-v`**；产物按 `{版本}_*` 命名（一版本一份）：
+一条命令完成 **RelWithDebInfo 重编 → wrk 负载 → perf 采样 → inclusive 符号表 + 火焰图 SVG**。  
+**必须** 指定设计版本 `-v`（与 `benchmark_log/{版本}_*_bench.md` 对齐）。
 
 ```bash
-bash scripts/perf_bench.sh -v v10.0
+bash scripts/perf_bench.sh -v v10.0          # 完整流程（默认 run）
+bash scripts/perf_bench.sh -h                # 脚本内简要帮助
 ```
 
-流程：停 server → 删 `build/` → RelWithDebInfo 重编 → 起 server → wrk + dwarf perf → **符号表 + 火焰图 SVG**。
+压测记录、符号表读法、手动 perf：见 [`benchmark_log/README.md`](../benchmark_log/README.md)。
 
-### 其他用法
+---
+
+### 子命令
+
+| 子命令 | 何时用 | 做什么 | 是否重编 |
+|--------|--------|--------|----------|
+| **`run`**（默认） | 新版本首次 perf，或需干净 RelWithDebInfo 二进制 | 停 server → 删 `build/` → 重编 → 起 server → wrk∥perf → 符号表 + SVG | 是（可用 `--skip-build` 跳过） |
+| **`flamegraph`** | 已有 `{版本}_perf.data`，只重生报告/图 | 读 `perf.data` → 生成 `{版本}_perf_report.txt` + `{版本}_flamegraph.svg` | 否 |
+| **`check`** | 上线前检查依赖、符号、FlameGraph | 检查 `cmake/perf/wrk/curl`、server 是否含 debug 符号、内存 | 否 |
 
 ```bash
-bash scripts/perf_bench.sh --skip-build -v v10.0
+bash scripts/perf_bench.sh run -v v10.0              # 可省略 run
+bash scripts/perf_bench.sh --skip-build -v v10.0     # 不重编，仍 wrk+perf
+bash scripts/perf_bench.sh flamegraph -v v10.0        # 仅 report + SVG
 bash scripts/perf_bench.sh check
-bash scripts/perf_bench.sh --stop-server -v v10.0
-bash scripts/perf_bench.sh flamegraph -v v10.0
+bash scripts/perf_bench.sh --stop-server -v v10.0    # run 结束后 SIGTERM 停 server
 ```
 
-### 常用选项
+---
 
-| 选项 | 说明 |
-|------|------|
-| `-v <版本>` | **必填**（run / flamegraph），如 `v10.0` |
-| `-d 秒` | 采样时长（默认 30） |
-| `--skip-build` | 跳过重编 |
+### 命令行选项
 
-已有 `{版本}_*` 产物时会提示 `[y/N]` 确认覆盖；确认后先删除将被覆盖的旧文件再生成（`run` 含 `perf.data`）。非交互环境可设 `PERF_BENCH_FORCE=1`。
+| 选项 | 默认值 | 作用 |
+|------|--------|------|
+| **`-v <版本>`** | （无，**必填**） | 设计版本号，如 `v10.0`、`v10.1`；产物命名为 `{版本}_*`；格式须匹配 `vN` 或 `vN.x` |
+| **`-d <秒>`** | `30` | wrk 持续时间，与 `perf record` 采样时长一致 |
+| **`-t <N>`** | `2` | wrk 线程数（`-t2`） |
+| **`-c <N>`** | `20` | wrk 连接数（`-c20`）；SSH 环境勿过大，防 OOM |
+| **`-u <url>`** | `http://127.0.0.1:8888/` | wrk 目标 URL（Keep-Alive GET） |
+| **`-i <file>`** | `artifacts/{版本}_perf.data` | **`flamegraph` 专用**：指定输入 `perf.data` 路径 |
+| **`-j <N>`** | `nproc` | `cmake --build` 并行编译线程数 |
+| **`--skip-build`** | 关 | 不删 `build/`、不重编；仍停/起 server 并采样（需已有 RelWithDebInfo 二进制） |
+| **`--fp`** | 关 | perf 用 **帧指针** `-g` 展开栈；默认 **`dwarf`**（`--call-graph dwarf`） |
+| **`--no-warmup`** | 关 | 跳过 wrk 5s 热身（`-t1 -c10 -d5s`） |
+| **`--stop-server`** | 关 | 流程结束后 `SIGTERM` 停 server |
+| **`--skip-wrk`** | 关 | 只 `perf record`，不跑 wrk（需自行保证采样期间有负载） |
+| **`-h` / `--help`** | — | 打印简要用法并退出 |
+
+**说明：**
+
+- **`run` 默认可写产物**：`{版本}_wrk.txt`（除非 `--skip-wrk`）、`{版本}_perf.data`、`{版本}_perf_report.txt`、`{版本}_flamegraph.svg`。
+- **`flamegraph` 只覆盖**：`{版本}_perf_report.txt`、`{版本}_flamegraph.svg`（**不删** `perf.data`）。
+- 同版本产物已存在 → 提示 **`[y/N]`** 覆盖；确认后 **先删除将被覆盖的旧文件** 再生成。非交互：`PERF_BENCH_FORCE=1`。
+- perf 同跑 wrk 的 RPS **不作** 版本 wrk 验收（见 bench 报告 §4 vs §5）。
+
+---
+
+### 环境变量
+
+| 变量 | 默认值 | 含义 |
+|------|--------|------|
+| **`BUILD_DIR`** | `<项目根>/build` | CMake 构建目录 |
+| **`BUILD_JOBS`** | `nproc` | 编译 `-j`；也可用 `-j` 选项 |
+| **`ARTIFACTS_DIR`** | `benchmark_log/artifacts` | 产物输出目录 |
+| **`FLAMEGRAPH_DIR`** | `$HOME/FlameGraph` | FlameGraph 克隆路径；缺失时脚本自动 `git clone` |
+| **`SERVER_LOG`** | `/tmp/server.log` | 后台 server 日志 |
+| **`PERF_REPORT_PERCENT_LIMIT`** | `0.1` | 符号表只保留 Overhead ≥ 该值（%）的符号 |
+| **`PERF_BENCH_FORCE`** | `0` | 设为 `1` 时跳过覆盖确认，直接删旧产物并重生 |
+
+示例：
+
+```bash
+PERF_REPORT_PERCENT_LIMIT=0.2 bash scripts/perf_bench.sh flamegraph -v v10.0
+PERF_BENCH_FORCE=1 bash scripts/perf_bench.sh -v v10.0
+BUILD_JOBS=2 bash scripts/perf_bench.sh -v v10.0
+```
+
+---
 
 ### 产物（`benchmark_log/artifacts/`）
 
-| 文件 | 内容 |
+| 文件 | 内容 | 入库 |
+|------|------|------|
+| `{版本}_wrk.txt` | 与 perf 同跑的 wrk 终端输出 | 否 |
+| `{版本}_perf.data` | perf 原始采样 | 否 |
+| `{版本}_perf_report.txt` | **inclusive flat 符号表**（见下） | 否 |
+| `{版本}_flamegraph.svg` | 火焰图（调用链） | 否 |
+
+**符号表生成命令（脚本内置，勿改口径）：**
+
+```bash
+perf report -i <perf.data> --stdio --sort comm,dso,symbol --percent-limit 0.1 -g none
+```
+
+| 要点 | 说明 |
 |------|------|
-| `{版本}_wrk.txt` | wrk 输出 |
-| `{版本}_perf.data` | perf 数据 |
-| `{版本}_perf_report.txt` | inclusive flat 符号表（Overhead 含子函数，≥0.1%） |
-| `{版本}_flamegraph.svg` | 火焰图（调用链） |
+| **inclusive** | **不用** `--no-children` → Overhead **含子函数/子调用** |
+| **flat** | **`-g none`** → 一行一符号，**无** `\|---` 调用树 |
+| **读法** | `head -40` 看热点；用户态看 `Shared Object=server`；调用链看 SVG |
 
-**读法**：符号表 `head -40`（inclusive；用户态看 `Shared Object=server`）；火焰图 Search 看 caller。详见 [`benchmark_log/README.md`](../benchmark_log/README.md)「读 perf 产物（符号表 + 火焰图）」。
+结论写入 `benchmark_log/{版本}_{YYYYMMDD}_bench.md` §5（模板见 `benchmark_log/TEMPLATE.md`）。
 
-记录文档：`benchmark_log/{版本}_{YYYYMMDD}_bench.md`（wrk + perf 同一份）。详见 [`benchmark_log/README.md`](../benchmark_log/README.md)。
+---
+
+### 典型场景
+
+| 场景 | 命令 |
+|------|------|
+| 新版本完整 perf | `bash scripts/perf_bench.sh -v v10.1` |
+| 已编译，只重跑采样 | `bash scripts/perf_bench.sh --skip-build -v v10.1` |
+| 只重生符号表/火焰图 | `bash scripts/perf_bench.sh flamegraph -v v10.0` |
+| 指定 perf.data | `bash scripts/perf_bench.sh flamegraph -v v10.0 -i /path/to/perf.data` |
+| 采样后自动停 server | `bash scripts/perf_bench.sh --stop-server -v v10.0` |
+| 检查环境 | `bash scripts/perf_bench.sh check` |
+
+---
+
+### perf 相关常见问题
+
+| 现象 | 处理 |
+|------|------|
+| `Permission denied`（perf） | ECS 常见 `paranoid=2`，脚本会尝试 `sudo perf` |
+| `perf report 未生成 flat 符号表` | 确认 `git pull` 最新脚本；手动：`perf report ... -g none \| head -30` |
+| 符号表上万行、有 `\|---` | 非正常 flat；按上条排查 |
+| `stackcollapse-perf.pl` 找不到 | 安装 FlameGraph 或让脚本自动克隆到 `~/FlameGraph` |
+| 覆盖确认在非交互环境卡住 | `PERF_BENCH_FORCE=1` 或先手动删 `{版本}_*` |
 
 ---
 
