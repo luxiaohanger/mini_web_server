@@ -274,7 +274,7 @@ BUILD_JOBS=2 bash scripts/perf_bench.sh -v v10.0
 
 | 段落 | 方法 |
 |------|------|
-| **§1 内核态** | `perf script` → 每样本栈上「用户→内核」边界的第一个内核符号（不展开内部） |
+| **§1 内核态** | `perf script -F …,trace` + `stackcollapse-perf.pl --kernel` → 每栈第一个 `_[k]` 符号 |
 | **§2 用户态** | `perf report --sort symbol --dsos=server --percent-limit 0.1 -g none`（inclusive） |
 
 | 要点 | 说明 |

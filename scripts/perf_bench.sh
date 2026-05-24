@@ -319,6 +319,48 @@ extract_perf_table() {
     ' "$file"
 }
 
+# §2 精简为 All / Self / Symbol 三列（去掉 perf IPC 宽表与点线分隔）
+compact_user_symbol_table() {
+    awk '
+        BEGIN { hdr = 0 }
+        /^# (Overhead|Children|All)/ {
+            if ($0 ~ /Self/) {
+                print "# All      Self  Symbol"
+                hdr = 1
+            } else if ($0 ~ /^# Overhead/) {
+                print "# All      Self  Symbol"
+                hdr = 2
+            }
+            next
+        }
+        /^# \./ { next }
+        /^# \(Cannot load tips/ { exit }
+        hdr == 1 && /^[[:space:]]+[0-9]/ {
+            sym = $3
+            for (i = 4; i <= NF; i++) {
+                if ($i == "-" && i < NF && $(i + 1) == "-") {
+                    break
+                }
+                sym = sym " " $i
+            }
+            sub(/^\[\.\][[:space:]]+/, "", sym)
+            printf " %7s  %7s  %s\n", $1, $2, sym
+            next
+        }
+        hdr == 2 && /^[[:space:]]+[0-9]/ {
+            sym = $2
+            for (i = 3; i <= NF; i++) {
+                if ($i == "-" && i < NF && $(i + 1) == "-") {
+                    break
+                }
+                sym = sym " " $i
+            }
+            sub(/^\[\.\][[:space:]]+/, "", sym)
+            printf " %7s  %7s  %s\n", $1, "0.00%", sym
+        }
+    '
+}
+
 run_perf_report_flat() {
     local data="$1" dest="$2"
     shift 2
@@ -345,57 +387,53 @@ run_perf_report_flat() {
 
 append_kernel_boundary_table() {
     local data="$1" limit="$2" report="$3"
-    local tmp err
-    tmp="$(mktemp "${report}.kern.XXXXXX")"
+    local tmp folded err sc_err
+    ensure_flamegraph
+    tmp="$(mktemp "${report}.script.XXXXXX")"
+    folded="$(mktemp "${report}.folded.XXXXXX")"
     err="${tmp}.err"
+    sc_err="${tmp}.sc.err"
 
-    if ! perf_cmd script -i "$data" >"$tmp" 2>"$err"; then
-        warn "perf script stderr: $(head -5 "$err" 2>/dev/null || true)"
-        rm -f "$tmp" "$err"
-        die "perf script (内核边界) 失败"
+    if ! perf_cmd script -i "$data" \
+        -F comm,pid,tid,cpu,time,event,ip,sym,dso,trace >"$tmp" 2>"$err"; then
+        warn "perf script -F trace 不可用，回退默认 script 输出"
+        if ! perf_cmd script -i "$data" >"$tmp" 2>"$err"; then
+            warn "perf script stderr: $(head -5 "$err" 2>/dev/null || true)"
+            rm -f "$tmp" "$folded" "$err" "$sc_err"
+            die "perf script (内核边界) 失败"
+        fi
     fi
     rm -f "$err"
 
+    if ! stackcollapse-perf.pl --kernel <"$tmp" >"$folded" 2>"$sc_err"; then
+        warn "stackcollapse-perf.pl stderr: $(head -5 "$sc_err" 2>/dev/null || true)"
+        rm -f "$tmp" "$folded" "$sc_err"
+        die "stackcollapse-perf.pl (内核边界) 失败"
+    fi
+    rm -f "$sc_err" "$tmp"
+
     awk -v limit="$limit" '
-    function is_kernel(dso,    d) {
-        d = dso
-        sub(/^[[:space:]]+/, "", d)
-        sub(/[[:space:]]+$/, "", d)
-        return (d == "[kernel.kallsyms]" || d == "[k]")
+    function strip_k_suffix(name) {
+        sub(/_\[k\]$/, "", name)
+        sub(/_\[k\]\+0x[0-9a-fA-F]+$/, "", name)
+        return name
     }
-    function parse_line(line,    rest, lp, rp) {
-        if (line !~ /^[[:space:]]+[0-9a-fA-F]+[[:space:]]+/) {
-            return 0
+    {
+        wt = $2 + 0
+        if (wt <= 0) {
+            wt = 1
         }
-        rest = line
-        sub(/^[[:space:]]+[0-9a-fA-F]+[[:space:]]+/, "", rest)
-        lp = index(rest, "(")
-        rp = match(rest, /\)[[:space:]]*$/)
-        if (lp <= 0 || rp <= 0) {
-            return 0
-        }
-        parsed_sym = substr(rest, 1, lp - 1)
-        parsed_dso = substr(rest, lp + 1, rp - lp - 2)
-        sub(/[[:space:]]+$/, "", parsed_sym)
-        return 1
-    }
-    function flush_stack(    i) {
-        if (n == 0) {
-            return
-        }
-        total_samples++
-        for (i = n; i >= 1; i--) {
-            if (!parse_line(stack[i])) {
-                continue
-            }
-            if (is_kernel(parsed_dso)) {
-                count[parsed_sym]++
-                return
+        total_samples += wt
+        n = split($1, frames, ";")
+        for (i = 1; i <= n; i++) {
+            if (frames[i] ~ /_\[k\]$/) {
+                sym = strip_k_suffix(frames[i])
+                count[sym] += wt
+                break
             }
         }
     }
     END {
-        flush_stack()
         if (total_samples == 0) {
             print "# (无调用栈样本；检查 perf.data 是否含 call-graph)"
             exit
@@ -407,6 +445,10 @@ append_kernel_boundary_table() {
             if (pct[sym] + 0 >= limit + 0) {
                 order[++nout] = sym
             }
+        }
+        if (nout == 0) {
+            print "# (未识别到用户→内核边界；请确认 perf record 使用了 -g / --call-graph)"
+            exit
         }
         for (i = 1; i < nout; i++) {
             for (j = i + 1; j <= nout; j++) {
@@ -420,17 +462,8 @@ append_kernel_boundary_table() {
             printf " %7.2f%%  %s\n", pct[sym], sym
         }
     }
-    /^[[:space:]]+[0-9a-fA-F]+[[:space:]]+/ {
-        stack[++n] = $0
-        next
-    }
-    {
-        flush_stack()
-        delete stack
-        n = 0
-    }
-    ' "$tmp" >>"$report"
-    rm -f "$tmp"
+    ' "$folded" >>"$report"
+    rm -f "$folded"
 }
 
 append_user_server_table() {
@@ -440,7 +473,7 @@ append_user_server_table() {
 
     if run_perf_report_flat "$data" "$tmp_user" --stdio --sort symbol --percent-limit "$limit" \
         -g none --dsos=server; then
-        cat "$tmp_user" >>"$report"
+        compact_user_symbol_table <"$tmp_user" >>"$report"
         rm -f "$tmp_user"
         return 0
     fi
@@ -462,7 +495,7 @@ append_user_server_table() {
             next
         }
         hdr && /^[[:space:]]+[0-9]/ && $0 ~ /[[:space:]]server[[:space:]]/ { print }
-    ' "$tmp_all" >>"$report"
+    ' "$tmp_all" | compact_user_symbol_table >>"$report"
     rm -f "$tmp_user" "$tmp_all"
 }
 
@@ -490,7 +523,7 @@ generate_report() {
         printf '# 调用链: %s_flamegraph.svg\n' "$base"
         printf '# 原始: %s\n#\n' "$(basename "$data")"
         printf '# === §1 内核态（用户→内核边界） ===\n'
-        printf '# 方法: perf script 逐样本，从最外层 caller 向采样点找第一个 [kernel.kallsyms] 符号\n#\n'
+        printf '# 方法: perf script + stackcollapse-perf.pl --kernel；从最外层 caller 找第一个 _[k] 符号\n#\n'
     } >"$report"
     append_kernel_boundary_table "$data" "$limit" "$report"
     {

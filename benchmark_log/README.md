@@ -239,11 +239,9 @@ mkdir -p benchmark_log/artifacts
 
 **符号表（分层）**
 
-- **§1 内核态**：`perf script` 逐样本解析栈，从最外层 caller 向采样点找 **第一个** `[kernel.kallsyms]` 符号 → 即 libc/syscall 进入内核的 **最外层**（如 `__x64_sys_epoll_wait`），**不含** `do_epoll_wait`、`tcp_*` 等内部子调用。Overhead = 占 **全部 perf 样本** 的比例。
+- **§1 内核态**：`perf script` + `stackcollapse-perf.pl --kernel`，从最外层 caller 向里找 **第一个** `_[k]` 内核符号（等价于用户→内核边界），**不含**更深层 `do_*` / `tcp_*`。
 - **§2 用户态 (server)**：`perf report --sort symbol --dsos=server -g none`（inclusive，**不用** `--no-children`）。
-- **§2 表头**：
-  - 常见：`All / Self / ...`（脚本将 perf 原始列名 **Children** 归一为 **All**）
-  - 旧版 perf 仅 `Overhead / ...` 时，**Overhead 列语义同 All**
+- **§2 表头**：报告内精简为 **`All / Self / Symbol` 三列**（脚本去掉 perf IPC 宽表与点线分隔）；perf 原始列名 Children 归一为 All。
 - **All 与 Self**（§2，分母均为 **全部 perf 样本**）：
   - **All**：栈上 **经过** 该函数及其子函数的样本占比（含 callees；定优化优先级 **看此列**）
   - **Self**：PC **仅落在该函数体内** 的样本占比（不含 callees；判断热点在自身还是下游）
