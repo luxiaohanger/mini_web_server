@@ -60,7 +60,7 @@ usage() {
 
 说明:
   - 一设计版本一份产物：benchmark_log/artifacts/{版本}_wrk.txt 等
-  - 产物已存在时将提示 [y/N] 确认覆盖（非交互可设 PERF_BENCH_FORCE=1）
+  - 产物已存在时将提示 [y/N] 确认覆盖；确认后 **先删除** 将被覆盖的旧文件（含 perf.data），再重新生成
   - 记录文档: benchmark_log/{版本}_{YYYYMMDD}_bench.md（按 TEMPLATE 填写 wrk + perf）
 
 环境变量: BUILD_DIR, BUILD_JOBS, FLAMEGRAPH_DIR, ARTIFACTS_DIR, SERVER_LOG, PERF_REPORT_PERCENT_LIMIT, PERF_BENCH_FORCE
@@ -102,6 +102,17 @@ artifact_output_paths() {
     fi
 }
 
+remove_artifacts_to_overwrite() {
+    local mode="$1"
+    local p
+    while IFS= read -r p; do
+        if [[ -f "$p" ]]; then
+            rm -f "$p"
+            log "已删除旧产物: $p"
+        fi
+    done < <(artifact_output_paths "$mode")
+}
+
 confirm_overwrite_if_needed() {
     local mode="$1"
     local existing=() p ans
@@ -113,24 +124,25 @@ confirm_overwrite_if_needed() {
 
     if [[ "${PERF_BENCH_FORCE:-0}" == "1" ]]; then
         warn "PERF_BENCH_FORCE=1，将覆盖 ${#existing[@]} 个已有产物"
-        return 0
+    else
+        log "以下产物已存在:"
+        for p in "${existing[@]}"; do
+            printf '  %s\n' "$p"
+        done
+
+        while true; do
+            if ! read -r -p '[perf_bench] 覆盖? [y/N] ' ans; then
+                die "已取消（非交互环境请删除产物或设 PERF_BENCH_FORCE=1）"
+            fi
+            case "$ans" in
+                y | Y) break ;;
+                n | N | "") die "已取消" ;;
+                *) warn "请输入 y 或 n" ;;
+            esac
+        done
     fi
 
-    log "以下产物已存在:"
-    for p in "${existing[@]}"; do
-        printf '  %s\n' "$p"
-    done
-
-    while true; do
-        if ! read -r -p '[perf_bench] 覆盖? [y/N] ' ans; then
-            die "已取消（非交互环境请删除产物或设 PERF_BENCH_FORCE=1）"
-        fi
-        case "$ans" in
-            y | Y) return 0 ;;
-            n | N | "") die "已取消" ;;
-            *) warn "请输入 y 或 n" ;;
-        esac
-    done
+    remove_artifacts_to_overwrite "$mode"
 }
 
 ensure_flamegraph() {

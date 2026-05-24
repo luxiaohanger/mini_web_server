@@ -199,7 +199,7 @@ bash scripts/perf_bench.sh flamegraph -v v10.0
 | `-d 秒` | 采样时长（默认 30） |
 | `--skip-build` | 跳过重编 |
 
-已有 `{版本}_*` 产物时会提示 `[y/N]` 确认覆盖；非交互环境可设 `PERF_BENCH_FORCE=1`。
+已有 `{版本}_*` 产物时会提示 `[y/N]` 确认覆盖；确认后先删除将被覆盖的旧文件再生成（`run` 含 `perf.data`）。非交互环境可设 `PERF_BENCH_FORCE=1`。
 
 ### 产物（`benchmark_log/artifacts/`）
 

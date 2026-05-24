@@ -270,7 +270,7 @@ mkdir -p benchmark_log/artifacts
 
 脚本内 wrk 参数：`wrk -t2 -c20 -d30s`（Keep-Alive）。**不要**把 `{版本}_wrk.txt` 里的 RPS 与「手动 wrk」§4 对比。
 
-同版本产物已存在时，脚本会列出路径并询问 `[y/N]` 是否覆盖；非交互（如 cron）可设 `PERF_BENCH_FORCE=1`。
+同版本产物已存在时，脚本会列出路径并询问 `[y/N]` 是否覆盖；确认后 **先删除** 旧文件（`run` 含 `perf.data`，`flamegraph` 仅删 report/SVG），再重新生成。非交互可设 `PERF_BENCH_FORCE=1`。
 
 ### 填表
 
