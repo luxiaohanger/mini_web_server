@@ -180,7 +180,7 @@ echo "exit code: $?"
 bash scripts/perf_bench.sh -v v10.0
 ```
 
-流程：停 server → 删 `build/` → RelWithDebInfo 重编 → 起 server → wrk + dwarf perf → 火焰图。
+流程：停 server → 删 `build/` → RelWithDebInfo 重编 → 起 server → wrk + dwarf perf → **符号表 + 火焰图 SVG**。
 
 ### 其他用法
 
@@ -205,8 +205,10 @@ bash scripts/perf_bench.sh flamegraph -v v10.0
 |------|------|
 | `{版本}_wrk.txt` | wrk 输出 |
 | `{版本}_perf.data` | perf 数据 |
-| `{版本}_perf_report.txt` | 文本报告 |
-| `{版本}_flamegraph.svg` | 火焰图 |
+| `{版本}_perf_report.txt` | 完整符号表（flat，定优化方向） |
+| `{版本}_flamegraph.svg` | 火焰图（调用链，浏览器打开） |
+
+**读法**：符号表看 Overhead 前几名定优先级；火焰图 Search 同名符号看 caller 分支。详见 [`benchmark_log/README.md`](../benchmark_log/README.md)「读 perf 产物（符号表 + 火焰图）」。
 
 记录文档：`benchmark_log/{版本}_{YYYYMMDD}_bench.md`（wrk + perf 同一份）。详见 [`benchmark_log/README.md`](../benchmark_log/README.md)。
 

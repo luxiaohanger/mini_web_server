@@ -94,7 +94,7 @@ wrk -t2 -c20 -d30s http://127.0.0.1:8888/
 
 ## 5. perf / flamegraph
 
-> 操作见 [`README.md`](./README.md)「perf 采样」。本节填本次结果；未做 perf 可写「本版本未做 perf」或省略。
+> 操作与读法见 [`README.md`](./README.md)「自动 perf」「读 perf 产物（符号表 + 火焰图）」。本节填本次结果；未做 perf 可写「本版本未做 perf」或省略。
 
 ### 5.1 采样命令
 
@@ -109,7 +109,8 @@ bash scripts/perf_bench.sh -v v10.0
 | 构建类型 | RelWithDebInfo |
 | 并发 wrk | `wrk -t2 -c20 -d30s http://127.0.0.1:8888/` |
 | 采样时长 | 30s |
-| 产物路径 | `benchmark_log/artifacts/{版本}_flamegraph.svg` |
+| 符号表 | `benchmark_log/artifacts/{版本}_perf_report.txt` |
+| 火焰图 | `benchmark_log/artifacts/{版本}_flamegraph.svg` |
 | perf.data | `benchmark_log/artifacts/{版本}_perf.data` |
 
 ### 5.3 wrk（与 perf 同跑，可选）
@@ -120,14 +121,16 @@ bash scripts/perf_bench.sh -v v10.0
 
 ### 5.4 热点摘要
 
+> 先读符号表 Overhead 前几名，再在火焰图 Search 对应符号确认调用链。
+
 | 占比（约） | 符号 / 函数 | 说明 |
 |------------|-------------|------|
 | | | |
 
-### 5.5 perf report 摘录（可选）
+### 5.5 符号表摘录（可选）
 
 ```text
-（粘贴 perf report 摘录）
+（粘贴 perf_report.txt 中 Overhead 最高的若干行）
 ```
 
 ---

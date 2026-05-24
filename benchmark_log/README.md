@@ -191,7 +191,7 @@ bash scripts/perf_bench.sh flamegraph -v v10.0
 bash scripts/perf_bench.sh --stop-server -v v10.0
 ```
 
-流程：停 server → 删 `build/` → RelWithDebInfo 重编 → 起 server → wrk+perf 并行 30s → 生成 report 与 SVG。
+流程：停 server → 删 `build/` → RelWithDebInfo 重编 → 起 server → wrk+perf 并行 30s → 生成 **符号表** 与 **火焰图 SVG**。
 
 ### 前置条件
 
@@ -223,15 +223,45 @@ mkdir -p benchmark_log/artifacts
 |------|------|
 | `{版本}_wrk.txt` | 同跑 wrk 输出（**RPS 不作版本验收**） |
 | `{版本}_perf.data` | perf 原始数据 |
-| `{版本}_perf_report.txt` | 文本报告 |
-| `{版本}_flamegraph.svg` | 火焰图 |
+| `{版本}_perf_report.txt` | **完整符号表**（flat，按 Overhead 降序） |
+| `{版本}_flamegraph.svg` | **火焰图**（调用链，浏览器打开） |
+
+### 读 perf 产物（符号表 + 火焰图）
+
+两份文件来自同一份 `perf.data`，分工阅读：
+
+| 产物 | 回答的问题 | 怎么用 |
+|------|------------|--------|
+| **`_perf_report.txt` 符号表** | 总体优化方向：还有哪些热点、各占多少 % | 看 `Overhead` 列，从高到低扫；前几名决定优先改什么 |
+| **`_flamegraph.svg` 火焰图** | 调用链：热点从哪条路径来、如何分叉 | 浏览器打开；Search 符号名；点宽条放大子树 |
+
+**符号表**
+
+- 每一行一个符号（函数名）；`Overhead` = 该符号占 **全部 CPU 采样** 的比例（同一份样本可出现在多行，各行 **不必相加为 100%**）。
+- 默认 **含子函数（inclusive）**：父符号的 % 包含其调用的函数。
+- `[k]` / `[kernel.kallsyms]` 为内核；无标记的 `Connection::` 等为用户态；`[unknown]` 表示缺符号，需 RelWithDebInfo 重编。
+
+**火焰图**
+
+- **横轴（宽度）** = 该栈路径占样本比例（越宽越热）；**不是**时间轴。
+- **纵轴（高度）** = 调用深度（越往上越靠近上层 caller）。
+- **Search** 高亮符号；**点击** 某条放大以该帧为根的子树。
+- 优先看最宽的 **用户态** 帧（如 `onHttp`、`enqueue`、`bufferToSck`），再理解其下的 `write`、`tcp_*`、`futex`；不要只盯内核 leaf。
+
+**推荐流程（定方向 → 落方案）**
+
+1. 符号表：列出 Overhead ≥ 约 1%～2% 的符号，区分用户态 / 内核 / 锁 / 网络。
+2. 火焰图：对表内前几名 Search，确认从 `EventLoop::loop` 等根上的调用分支。
+3. 将结论写入该版本报告 §5.4「热点摘要」；§5.5 可粘贴符号表前几行或火焰图关键路径文字。
+4. wrk RPS 仍以报告 §4 为准；perf 只说明 CPU 花在哪，不代替版本验收。
 
 ### 用途与注意
 
 | 目标 | 说明 |
 |------|------|
-| 找 CPU 热点 | HttpProcess、Buffer、锁、分配器等 |
-| 指导下一版 src 优化 | 先优化火焰图里最宽的函数 |
+| 定 CPU 优化方向 | 先读 **符号表** 前几名（HttpProcess、Buffer、enqueue、write 等） |
+| 定具体改哪条路径 | 再读 **火焰图** 里对应宽条的上游 caller |
+| 指导下一版 src | 优先动符号表与火焰图 **都宽** 的用户态路径 |
 | **不是** | 再验 wrk RPS；同跑 wrk 仅保证采样期间有负载 |
 
 脚本内 wrk 参数：`wrk -t2 -c20 -d30s`（Keep-Alive）。**不要**把 `{版本}_wrk.txt` 里的 RPS 与「手动 wrk」§4 对比。
@@ -240,14 +270,14 @@ mkdir -p benchmark_log/artifacts
 
 1. 在**该版本**报告 md 中填写 §5（与 §4 wrk 同文件）
 2. 元信息：**设计版本**、测试类型
-3. 第 5 节：产物路径用 `{版本}_*` 格式；热点摘要 + perf report 摘录
+3. 第 5 节：产物路径用 `{版本}_*` 格式；§5.4 热点摘要（符号表 + 火焰图）；§5.5 可贴符号表前几行
 
 ### 常见问题
 
 | 现象 | 处理 |
 |------|------|
 | `Permission denied` | `sudo perf record` |
-| 火焰图全是 `[unknown]` | RelWithDebInfo 重建；脚本默认 `--call-graph dwarf` |
+| 符号表只有少量 `[unknown]` | 正常；若大面积 unknown → RelWithDebInfo 重建；脚本默认 `--call-graph dwarf` |
 | `pgrep` 无输出 | 确认 server 已启动；用 `pgrep -x server` |
 | SSH 卡死 | 只用 `-c20`；`free -h`；tmux |
 | 同跑 wrk RPS 与 §4 不一致 | **预期**（构建类型与 perf 开销不同） |
@@ -310,11 +340,12 @@ sudo perf record -F 997 --call-graph dwarf -p "$SERVER_PID" -o benchmark_log/art
 | `-p PID` | 只采 server |
 | `sleep 30` | 与 wrk `-d30s` 对齐 |
 
-**文本报告：**
+**符号表（完整 flat 列表）：**
 
 ```bash
-sudo perf report -i benchmark_log/artifacts/v10.0_perf.data --stdio -g --no-children \
-  | tee benchmark_log/artifacts/v10.0_perf_report.txt
+sudo perf report -i benchmark_log/artifacts/v10.0_perf.data \
+  --stdio --sort symbol --percent-limit 0 \
+  > benchmark_log/artifacts/v10.0_perf_report.txt
 ```
 
 **火焰图（需 FlameGraph）：**
@@ -328,9 +359,9 @@ sudo perf script -i benchmark_log/artifacts/${BASE}_perf.data | stackcollapse-pe
   > benchmark_log/artifacts/${BASE}_flamegraph.svg
 ```
 
-读图：**横轴** = 样本占比（越宽越热）；**纵轴** = 调用栈；找最宽的**用户态**帧，不要只盯 `epoll_wait`。
+读法见上文「读 perf 产物（符号表 + 火焰图）」。
 
-### perf report 符号参考
+### perf 符号参考
 
 | 符号类型 | 通常含义 | 优化优先级 |
 |----------|----------|------------|

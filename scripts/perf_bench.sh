@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# perf 全自动：清 build → RelWithDebInfo 重编 → 起 server → wrk+perf → 火焰图
+# perf 全自动：清 build → RelWithDebInfo 重编 → 起 server → wrk+perf → 符号表 + 火焰图
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -30,11 +30,11 @@ usage() {
 用法: bash scripts/perf_bench.sh [选项] [子命令]
 
 一条命令全自动（默认 run）:
-  停 server → 删除 build/ → RelWithDebInfo 重编 → 起 server → wrk+perf → 火焰图
+  停 server → 删除 build/ → RelWithDebInfo 重编 → 起 server → wrk+perf → 符号表 + SVG
 
 子命令:
   run          完整流程（默认）
-  flamegraph   仅从已有 perf.data 生成 SVG + report
+  flamegraph   仅从已有 perf.data 生成 SVG + 符号表 report
   check        检查依赖与当前二进制符号（不重编）
 
 选项:
@@ -228,9 +228,9 @@ generate_report() {
     local base report
     base="$(artifact_base)"
     report="$ARTIFACTS_DIR/${base}_perf_report.txt"
-    log "perf report → $report"
-    perf_cmd report -i "$data" --stdio -g --no-children | tee "$report" | head -80
-    log "完整报告: $report"
+    log "perf 符号表 → $report"
+    perf_cmd report -i "$data" --stdio --sort symbol --percent-limit 0 >"$report"
+    log "符号表: $report ($(wc -l <"$report" | tr -d ' ') 行)"
 }
 
 cmd_check() {
@@ -325,8 +325,8 @@ cmd_run() {
     log "完成 → $ARTIFACTS_DIR"
     log "  wrk:        ${base}_wrk.txt"
     log "  perf.data:  ${base}_perf.data"
-    log "  report:     ${base}_perf_report.txt"
-    log "  flamegraph: ${base}_flamegraph.svg"
+    log "  report:     ${base}_perf_report.txt（完整符号表）"
+    log "  flamegraph: ${base}_flamegraph.svg（调用链）"
     log "请更新或新建 benchmark_log/${DESIGN_VER}_YYYYMMDD_bench.md（wrk + perf 同一份）"
 
     if [[ "$STOP_SERVER" -eq 1 ]]; then
