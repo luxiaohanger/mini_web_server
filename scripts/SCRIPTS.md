@@ -267,22 +267,26 @@ BUILD_JOBS=2 bash scripts/perf_bench.sh -v v10.0
 |------|------|------|
 | `{版本}_wrk.txt` | 与 perf 同跑的 wrk 输出（仅写入文件） | 否 |
 | `{版本}_perf.data` | perf 原始采样 | 否 |
-| `{版本}_perf_report.txt` | **分层符号表**（§1 Wrapper×API + §2 server All/Self） | 否 |
+| `{版本}_perf_report.txt` | **分层符号表**（§0～§4） | 否 |
 | `{版本}_flamegraph.svg` | 火焰图（调用链） | 否 |
 
 **符号表生成（脚本内置，勿改口径）：**
 
-| 段落 | 方法 |
-|------|------|
-| **§1** | 栈上 **API**（write/epoll_wait/mutex…）+ **Wrapper**（Epoll::poll/updateChannel…）；不看内核实现 |
-| **§2 用户态** | `perf report` 全量 inclusive → 筛 `Shared Object=server` |
+一次 `perf report --stdio --sort comm,dso,symbol --percent-limit 0 -g none`，由 `render_unified_perf_report()` 输出：
+
+| 段落 | 方法 | 读法 |
+|------|------|------|
+| **§0** | 按 DSO 分层统计 **Self**（互斥） | 先看 kernel / libc / server 大盘 |
+| **§1** | 筛 `server` DSO，**All / Self** | **All** 定 src 优先级 |
+| **§2** | 内核符号 **Self**（≥ 阈值） | 原始热点 |
+| **§3** | §2 符号分类 **Self**（互斥） | syscall / network / futex / sched / other |
+| **§4** | `libc.so.6` 符号 **Self** | readv/write/epoll 等 |
 
 | 要点 | 说明 |
 |------|------|
-| **§1 明细** | `API + Wrapper`，如 `epoll_wait + Epoll::poll`、`write + EventLoop::enqueueTask` |
-| **§1 合并** | 按 API 汇总、按 Wrapper 汇总 |
-| **§2 读列** | **All** 排序；**Self** 参考 |
-| **读法** | §1 看程序员可见的 syscall 触发点；§2 定 src 优先级；调用链看 SVG |
+| **排序** | 必须 `comm,dso,symbol`（`dso,symbol` 会缺 DSO 列导致 §0 失效） |
+| **阈值** | `PERF_REPORT_PERCENT_LIMIT`（默认 `0.1`）过滤 §1/§2/§4 符号行；§0/§3 不过滤 |
+| **读法** | §0 → §3 → §1 → 火焰图 SVG |
 
 结论写入 `benchmark_log/{版本}_{YYYYMMDD}_bench.md` §5（模板见 `benchmark_log/TEMPLATE.md`）。
 

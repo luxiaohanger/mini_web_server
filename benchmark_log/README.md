@@ -223,31 +223,43 @@ mkdir -p benchmark_log/artifacts
 |------|------|
 | `{版本}_wrk.txt` | 同跑 wrk 输出（**RPS 不作版本验收**） |
 | `{版本}_perf.data` | perf 原始数据 |
-| `{版本}_perf_report.txt` | **分层符号表**（§1 Wrapper×API + §2 server All/Self，≥ 0.1%） |
+| `{版本}_perf_report.txt` | **分层符号表**（§0～§4；§1/§2/§4 符号行 ≥ 0.1%） |
 | `{版本}_flamegraph.svg` | **火焰图**（调用链，浏览器打开） |
 
-> 符号表：**两层** — §1 **Wrapper × API**（`Epoll::poll→epoll_wait`、`Buffer::bufferToSck→write`）；§2 server（看 **All**）。
+> 符号表：**§0 预算 → §1 server → §2/§3 kernel → §4 libc**；一次 `perf report --sort comm,dso,symbol` 解析。
 
 ### 读 perf 产物（符号表 + 火焰图）
 
 | 产物 | 回答的问题 | 怎么用 |
 |------|------------|--------|
-| **`_perf_report.txt` 符号表** | 哪个封装调用了哪个 API；纯业务 CPU | §1 看 **API + Wrapper**；§2 按 **All** |
+| **`_perf_report.txt` 符号表** | CPU 落在哪一层、src 该动哪 | 先 §0 预算，再 §1 **All**，§3 看内核构成 |
 | **`_flamegraph.svg` 火焰图** | 调用链 | 浏览器 Search |
 
-**§1 Wrapper × API**
+**§0 CPU 预算（Self，互斥）**
 
-- **API**：程序员写的接口 — `write`、`read`、`readv`、`epoll_wait`、`epoll_ctl`、`mutex`…（不是内核符号）
-- **Wrapper**：项目封装 — `Epoll::poll`、`Epoll::updateChannel`、`Buffer::sckToBuffer`…
-- 主表两列对应关系；同一 `write` 可拆到 `bufferToSck` 与 `enqueueTask`
-- **§2 用户态 (server)**：`perf report --sort comm,dso,symbol -g none` **全量 inclusive** 后筛 `Shared Object=server`（**不用** `--dsos=server`，避免 All 不含内核路径）。
-- **§2 表头**：报告内精简为 **`All / Self / Symbol` 三列**（脚本去掉 perf IPC 宽表与点线分隔）；perf 原始列名 Children 归一为 All。
-- **All 与 Self**（§2，分母均为 **全部 perf 样本**）：
-  - **All**：栈上 **经过** 该 server 函数及其 **全部 callees**（含 **libc、内核 syscall 路径**）的样本占比；定优化优先级 **看此列**
-  - **Self**：PC **仅落在该 server 函数体内** 的样本占比（**不含**子函数与内核）；判断热点在自身还是下游
-  - **勿** 将同一行的 Self + All 相加；**勿** 将表中各行百分比相加（父子行重叠计数）
-- **读法**：§1 看哪段代码触发 read/write/epoll；§2 定 src 优化优先级；`invoke`/`lambda` 多为 `std::function` 间接调用。
-- **`PERF_REPORT_PERCENT_LIMIT`** 可调阈值（默认 `0.1`）；完整调用链见火焰图。
+- 按 DSO 分层：`server` / `kernel` / `libc` / `libpthread` / `libstdc++` / `vdso` / `ldso` / `other`
+- **Self**：PC 落在该层时的样本占比；各行相加 ≈ 100%
+- 先读 §0 判断「内核 vs 用户态 vs server 本体」的大盘
+
+**§1 server（All / Self）**
+
+- 来源：`perf report --sort comm,dso,symbol -g none` 全量 inclusive，筛 `Shared Object=server`
+- **All**：栈上经过该 server 函数及全部 callees（含 libc、内核）的样本占比；**定 src 优先级看此列**
+- **Self**：PC 仅落在该 server 函数体内；Self 低而 All 高 → 时间在下游（enqueue、write、内核）
+- **勿** 将各行百分比相加（父子行重叠）；`invoke`/`lambda` 多为 `std::function` 间接调用
+
+**§2 kernel 符号（Self）**
+
+- 原始内核符号表（显示时去掉 `[k]` 前缀）；Overhead ≥ `PERF_REPORT_PERCENT_LIMIT`（默认 0.1%）
+
+**§3 kernel 分类（Self，互斥）**
+
+- 将 §2 符号归入：`syscall` / `network` / `futex` / `sched` / `other`
+- 各行相加 ≈ §0 的 `kernel` 行
+
+**§4 libc（Self）**
+
+- `libc.so.6` 符号；看 readv/write/epoll/pthread/malloc 等
 
 **火焰图**
 
@@ -258,16 +270,16 @@ mkdir -p benchmark_log/artifacts
 
 **推荐流程（定方向 → 落方案）**
 
-1. 符号表：§1 **Wrapper×API** → §2 按 **All** 排序。
-2. 火焰图：对 §2 前几名 Search，确认从 `EventLoop::loop` 等根上的调用分支。
-3. 将结论写入该版本报告 §5.4「热点摘要」；§5.5 可粘贴符号表前几行或火焰图关键路径文字。
+1. 符号表：§0 预算 → §3 内核构成 → §1 server 按 **All** 排序 → §4 libc。
+2. 火焰图：对 §1 前几名 Search，确认从 `EventLoop::loop` 等根上的调用分支。
+3. 将结论写入该版本报告 §5.3「热点摘要」与 §6「分析结果」。
 4. wrk RPS 仍以报告 §4 为准；perf 只说明 CPU 花在哪，不代替版本验收。
 
 ### 用途与注意
 
 | 目标 | 说明 |
 |------|------|
-| 定 CPU 优化方向 | 先读 **符号表** 前几名（HttpProcess、Buffer、enqueue、write 等） |
+| 定 CPU 优化方向 | 先读 §0 预算，再 §1 **All**（enqueue、onHttp、EventLoop 等）与 §3 内核构成 |
 | 定具体改哪条路径 | 再读 **火焰图** 里对应宽条的上游 caller |
 | 指导下一版 src | 优先动符号表与火焰图 **都宽** 的用户态路径 |
 | **不是** | 再验 wrk RPS；同跑 wrk 仅保证采样期间有负载 |
@@ -280,7 +292,7 @@ mkdir -p benchmark_log/artifacts
 
 1. 在**该版本**报告 md 中填写 §5（与 §4 wrk 同文件）
 2. 元信息：**设计版本**、测试类型
-3. 第 5 节：产物路径用 `{版本}_*` 格式；§5.4 热点摘要（符号表 + 火焰图）；§5.5 可贴符号表前几行
+3. 第 5 节：产物路径用 `{版本}_*` 格式；§5.3 热点摘要（§0 + §1 + §3 + 火焰图）；§6 写结论/异常/下一步
 
 ### 常见问题
 
@@ -352,16 +364,15 @@ sudo perf record -F 997 --call-graph dwarf -p "$SERVER_PID" -o benchmark_log/art
 | `-p PID` | 只采 server |
 | `sleep 30` | 与 wrk `-d30s` 对齐 |
 
-**符号表（与脚本一致，inclusive flat，Overhead ≥ 0.1%）：**
+**分层符号表（与脚本一致，§0～§4）：**
 
 ```bash
-sudo perf report -i benchmark_log/artifacts/v10.0_perf.data \
-  --stdio --sort comm,dso,symbol --percent-limit 0.1 -g none \
-  > benchmark_log/artifacts/v10.0_perf_report.txt
-head -40 benchmark_log/artifacts/v10.0_perf_report.txt
+bash scripts/perf_bench.sh flamegraph -v v10.0
+# 或指定 perf.data：bash scripts/perf_bench.sh flamegraph -v v10.0 -i /path/to/perf.data
+head -80 benchmark_log/artifacts/v10.0_perf_report.txt
 ```
 
-（不要加 `--no-children`；不要加 `-g` 以外的调用图选项。）
+（手动 `perf report` 只得到原始 flat 表，不含 §0 预算与 §3 内核分类；日常用脚本 `flamegraph` 子命令重生。）
 
 **火焰图（需 FlameGraph）：**
 

@@ -342,13 +342,3 @@
 - 修复：改为 `std::copy(buf.begin() + readIdx, buf.begin() + readIdx + count, peer->buf.begin() + peer->writeIdx)`，与 `readIdx += count` 语义一致。
 - 验证建议：构造 `readable() > count` 的源 buffer，调用 `bufToBuf` 后检查对端仅增加 `count` 字节、源端 `readable()` 减少 `count`；当前业务路径未调用该接口，属 API 正确性修复，后续 buffer 间搬运或重构可安全依赖。
 
-## FIX-035 `perf_bench.sh` §1 内核栈负向过滤漏报 write/发起函数
-
-- 修复日期：2026-05-24
-- 状态：Fixed
-- 位置：`scripts/perf_bench.sh` → `append_kernel_initiator_table`（原 `append_kernel_boundary_table`）
-- 影响：§1 仅见 `readv`/`epoll`/`futex` 等少量 syscall 行，缺 `write`、无法区分 eventfd/timerfd 触发，TCP 写路径不可见；约 10% `[unresolved-kernel-stack]`。
-- 根因：栈 awk **负向过滤**丢弃 `tcp_*` 等；**每样本单帧**归因易落 `schedule`/`do_readv`；eventfd/timerfd 与 socket 共用 `read`/`write` syscall 名。
-- 修复：§1 改为 **server 发起函数 → 类别**（read/write/readv/epoll/futex…）配对统计 + **按类别合并**；脚注给出纯用户态/未配对占比。文档同步 `benchmark_log/README.md`、`scripts/SCRIPTS.md`。
-- 验证：对已有 `v10.0_perf.data` 执行 `bash scripts/perf_bench.sh flamegraph -v v10.0`；§1 应含 `Buffer::bufferToSck → write`、`EventLoop::readCallback → read` 等行及类别合并表。
-

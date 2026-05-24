@@ -54,10 +54,10 @@ usage() {
   ARTIFACTS_DIR              产物目录（默认 benchmark_log/artifacts）
   FLAMEGRAPH_DIR             FlameGraph 路径（默认 ~/FlameGraph）
   SERVER_LOG                 server 日志（默认 /tmp/server.log）
-  PERF_REPORT_PERCENT_LIMIT  符号表阈值 %（默认 0.1）
+  PERF_REPORT_PERCENT_LIMIT  符号表阈值 %（默认 0.1，§0 不受限）
   PERF_BENCH_FORCE=1           跳过覆盖确认
 
-符号表: 分层（§1 系统调用 Wrapper/Direct + §2 server All/Self）；调用链见 SVG。
+符号表: §0 预算 + §1 server + §2/§3 kernel + §4 libc；调用链见 SVG。
 详情: scripts/SCRIPTS.md
 
 示例:
@@ -347,75 +347,6 @@ extract_perf_table() {
     ' "$file"
 }
 
-# §2 精简为 All / Self / Symbol；只保留 server DSO 行（All 来自全量 inclusive，含内核路径）
-compact_user_symbol_table() {
-    local server_dso="${1:-server}"
-    awk -v server_dso="$server_dso" '
-    function is_server_dso(dso,    n, base) {
-        if (dso == server_dso) {
-            return 1
-        }
-        n = split(dso, parts, "/")
-        base = parts[n]
-        return (base == server_dso)
-    }
-    BEGIN { hdr = 0 }
-    /^# (Overhead|Children|All)/ {
-        if ($0 ~ /Shared Object/) {
-            print "# All      Self  Symbol"
-            hdr = 1
-        } else if ($0 ~ /Self/) {
-            print "# All      Self  Symbol"
-            hdr = 2
-        } else if ($0 ~ /^# Overhead/) {
-            print "# All      Self  Symbol"
-            hdr = 3
-        }
-        next
-    }
-    /^# \./ { next }
-    /^# \(Cannot load tips/ { exit }
-    hdr == 1 && /^[[:space:]]+[0-9]/ {
-        if (!is_server_dso($4)) {
-            next
-        }
-        sym = $5
-        for (i = 6; i <= NF; i++) {
-            if ($i == "-" && i < NF && $(i + 1) == "-") {
-                break
-            }
-            sym = sym " " $i
-        }
-        sub(/^\[\.\][[:space:]]+/, "", sym)
-        printf " %7s  %7s  %s\n", $1, $2, sym
-        next
-    }
-    hdr == 2 && /^[[:space:]]+[0-9]/ {
-        sym = $3
-        for (i = 4; i <= NF; i++) {
-            if ($i == "-" && i < NF && $(i + 1) == "-") {
-                break
-            }
-            sym = sym " " $i
-        }
-        sub(/^\[\.\][[:space:]]+/, "", sym)
-        printf " %7s  %7s  %s\n", $1, $2, sym
-        next
-    }
-    hdr == 3 && /^[[:space:]]+[0-9]/ {
-        sym = $2
-        for (i = 3; i <= NF; i++) {
-            if ($i == "-" && i < NF && $(i + 1) == "-") {
-                break
-            }
-            sym = sym " " $i
-        }
-        sub(/^\[\.\][[:space:]]+/, "", sym)
-        printf " %7s  %7s  %s\n", $1, "0.00%", sym
-    }
-    '
-}
-
 run_perf_report_flat() {
     local data="$1" dest="$2"
     shift 2
@@ -440,242 +371,103 @@ run_perf_report_flat() {
     return 0
 }
 
-append_kernel_initiator_table() {
-    local data="$1" limit="$2" report="$3"
-    local tmp folded sc_err
-    ensure_flamegraph
-    tmp="$(mktemp "${report}.script.XXXXXX")"
-    folded="$(mktemp "${report}.folded.XXXXXX")"
-    sc_err="${tmp}.sc.err"
+# 从 perf report flat（--sort comm,dso,symbol -g none）一次解析并写入 §0～§4。
+render_unified_perf_report() {
+    local flat="$1" limit="$2" report="$3"
+    local server_dso
+    server_dso="$(basename "$SERVER")"
 
-    if ! perf_script_with_stacks "$data" "$tmp"; then
-        rm -f "$tmp" "$folded" "$sc_err"
-        die "perf script (§1 系统调用) 失败"
-    fi
-
-    if ! stackcollapse-perf.pl --kernel <"$tmp" >"$folded" 2>"$sc_err"; then
-        warn "stackcollapse-perf.pl stderr: $(head -5 "$sc_err" 2>/dev/null || true)"
-        rm -f "$tmp" "$folded" "$sc_err"
-        die "stackcollapse-perf.pl (§1) 失败"
-    fi
-    rm -f "$sc_err" "$tmp"
-
-    # §1：Wrapper（项目封装 poll/updateChannel…）× API（源码 write/readv/epoll_wait/mutex…）
-    awk -v limit="$limit" '
-    function strip_frame(name) {
-        sub(/_\[k\]$/, "", name)
-        sub(/_\[k\]\+0x[0-9a-fA-F]+$/, "", name)
-        return name
+    awk -v limit="$limit" -v server_dso="$server_dso" '
+    function pct_val(s,    t) {
+        t = s
+        sub(/%/, "", t)
+        return t + 0
     }
-    function stack_has_kernel(frames, n,    i) {
-        for (i = 1; i <= n; i++) {
-            if (frames[i] ~ /_\[k\]$/) {
-                return 1
-            }
-        }
-        return 0
+    function sym_clean(s,    t) {
+        t = s
+        sub(/^\[\.\][[:space:]]+/, "", t)
+        sub(/^\[k\][[:space:]]+/, "", t)
+        sub(/\+0x[0-9a-fA-F]+$/, "", t)
+        return t
     }
-    function first_kernel_idx(frames, n,    i) {
-        for (i = 1; i <= n; i++) {
-            if (frames[i] ~ /_\[k\]$/) {
-                return i
-            }
-        }
-        return 0
-    }
-    function normalize_api(sym,    s) {
-        s = sym
-        sub(/^__GI_/, "", s)
-        sub(/^__libc_/, "", s)
-        sub(/@.*$/, "", s)
-        if (s ~ /^pthread_mutex|^pthread_cond|^__lll_lock|^__pthread_mutex/) {
-            return "mutex"
-        }
-        if (s ~ /epoll_wait/) {
-            return "epoll_wait"
-        }
-        if (s ~ /epoll_ctl/) {
-            return "epoll_ctl"
-        }
-        if (s ~ /epoll_create1/) {
-            return "epoll_create"
-        }
-        if (s ~ /epoll_create/) {
-            return "epoll_create"
-        }
-        if (s ~ /timerfd_create/) {
-            return "timerfd_create"
-        }
-        if (s ~ /eventfd2?/) {
-            return "eventfd"
-        }
-        if (s ~ /^readv/) {
-            return "readv"
-        }
-        if (s ~ /^writev/) {
-            return "writev"
-        }
-        if (s ~ /^read$/) {
-            return "read"
-        }
-        if (s ~ /^write$/) {
-            return "write"
-        }
-        if (s ~ /accept4/) {
-            return "accept"
-        }
-        if (s ~ /accept/) {
-            return "accept"
-        }
-        if (s ~ /^close/) {
-            return "close"
-        }
-        if (s ~ /^fcntl/) {
-            return "fcntl"
-        }
-        if (s ~ /clock_gettime/) {
-            return "clock_gettime"
-        }
-        return ""
-    }
-    function api_from_kernel_entry(sym,    s) {
-        s = sym
-        sub(/^__x64_sys_/, "", s)
-        sub(/^__arm64_sys_/, "", s)
-        sub(/^__se_sys_/, "", s)
-        sub(/^__do_sys_/, "", s)
-        sub(/^__do_compat_sys_/, "", s)
-        if (s ~ /^futex/) {
-            return "mutex"
-        }
-        if (s ~ /^newfstatat|^fstat/) {
-            return "fstat"
-        }
-        if (s ~ /^epoll_create/) {
-            return "epoll_create"
-        }
+    function kern_base(sym,    s) {
+        s = sym_clean(sym)
+        sub(/\.isra\.[0-9]+$/, "", s)
+        sub(/\.constprop\.[0-9]+$/, "", s)
+        sub(/\.part\.[0-9]+$/, "", s)
         return s
     }
-    function find_api(frames, n,    i, sym, api, kidx) {
-        kidx = first_kernel_idx(frames, n)
-        if (kidx > 1) {
-            for (i = kidx - 1; i >= 1; i--) {
-                if (frames[i] ~ /_\[k\]$/) {
-                    continue
-                }
-                sym = strip_frame(frames[i])
-                api = normalize_api(sym)
-                if (api != "") {
-                    return api SUBSEP i
-                }
+    function sym_from_fields(start,    i, sym) {
+        sym = $start
+        for (i = start + 1; i <= NF; i++) {
+            if ($i == "-" && i < NF && $(i + 1) == "-") {
+                break
             }
+            sym = sym " " $i
         }
-        for (i = 1; i <= n; i++) {
-            if (frames[i] !~ /_\[k\]$/) {
-                continue
-            }
-            sym = strip_frame(frames[i])
-            if (sym ~ /^__x64_sys_|^__arm64_sys_|^__se_sys_|^__do_sys_|^__do_compat_sys_/) {
-                api = api_from_kernel_entry(sym)
-                if (api != "") {
-                    return api SUBSEP (i - 1)
-                }
-            }
-        }
-        return SUBSEP 0
+        return sym_clean(sym)
     }
-    function wrapper_from_symbol(sym) {
-        if (sym ~ /Epoll::poll$/) {
-            return "Epoll::poll"
-        }
-        if (sym ~ /Epoll::updateChannel/) {
-            return "Epoll::updateChannel"
-        }
-        if (sym ~ /Epoll::removeChannel/) {
-            return "Epoll::removeChannel"
-        }
-        if (sym ~ /Epoll::Epoll/) {
-            return "Epoll::Epoll"
-        }
-        if (sym ~ /Buffer::sckToBuffer/) {
-            return "Buffer::sckToBuffer"
-        }
-        if (sym ~ /Buffer::bufferToSck/) {
-            return "Buffer::bufferToSck"
-        }
-        if (sym ~ /Socket::sckWrite/) {
-            return "Socket::sckWrite"
-        }
-        if (sym ~ /Connection::readFromSck/) {
-            return "Connection::readFromSck"
-        }
-        if (sym ~ /Connection::sendHttpOnLoop/) {
-            return "Connection::sendHttpOnLoop"
-        }
-        if (sym ~ /Connection::trySendToSck/) {
-            return "Connection::trySendToSck"
-        }
-        if (sym ~ /EventLoop::readCallback/) {
-            return "EventLoop::readCallback"
-        }
-        if (sym ~ /EventLoop::enqueueTask/) {
-            return "EventLoop::enqueueTask"
-        }
-        if (sym ~ /TimerQueue::handleRead/) {
-            return "TimerQueue::handleRead"
-        }
-        if (sym ~ /TimerQueue::TimerQueue/) {
-            return "TimerQueue::TimerQueue"
-        }
-        if (sym ~ /ThreadPool::enqueue/) {
-            return "ThreadPool::enqueue"
-        }
-        if (sym ~ /Socket::acceptConnection/) {
-            return "Socket::acceptConnection"
-        }
-        if (sym ~ /Acceptor::/) {
-            return "Acceptor::handleRead"
-        }
-        if (sym ~ /EventLoop::loop$/) {
-            return "EventLoop::loop"
-        }
-        return ""
-    }
-    function is_server_symbol(sym) {
-        if (sym ~ /_\[k\]$/) {
+    function is_dso_token(s) {
+        if (s == "" || s ~ /%/) {
             return 0
         }
-        if (sym ~ /^__GI_/ || sym ~ /^__libc_/ || sym ~ /^pthread_/ || sym ~ /^std::/) {
-            return 0
-        }
-        if (normalize_api(sym) != "") {
-            return 0
-        }
-        return (sym ~ /::/ || sym ~ /^(Connection|EventLoop|Buffer|Epoll|TimerQueue|ThreadPool|Socket|Channel|HttpProcess|Acceptor|MainReactor|SubReactor|Server|Timer)/)
+        return (s ~ /^\// || s ~ /^\[/ || s ~ /\.so/ || s == server_dso || s ~ /^server$/)
     }
-    function find_wrapper(frames, n, api_idx,    j, sym, w, fallback, start) {
-        fallback = ""
-        start = api_idx + 0
-        if (start < 1) {
-            start = n
+    function is_server_dso(dso,    n, base) {
+        if (dso == server_dso) {
+            return 1
         }
-        for (j = start; j >= 1; j--) {
-            if (frames[j] ~ /_\[k\]$/) {
-                continue
-            }
-            sym = strip_frame(frames[j])
-            w = wrapper_from_symbol(sym)
-            if (w != "") {
-                return w
-            }
-            if (is_server_symbol(sym) && fallback == "") {
-                fallback = sym
-            }
+        n = split(dso, parts, "/")
+        base = parts[n]
+        return (base == server_dso)
+    }
+    function dso_bucket(dso,    n, base) {
+        if (dso ~ /\[kernel\.kallsyms\]|vmlinux|\[kernel\]|kallsyms/) {
+            return "kernel"
         }
-        if (fallback != "") {
-            return fallback
+        if (dso ~ /\[vdso\]|vdso\.so/) {
+            return "vdso"
         }
-        return "[unknown-wrapper]"
+        if (dso ~ /libpthread/) {
+            return "libpthread"
+        }
+        if (dso ~ /libstdc\+\+/) {
+            return "libstdc++"
+        }
+        if (dso ~ /libc\.|\/libc-/) {
+            return "libc"
+        }
+        n = split(dso, parts, "/")
+        base = parts[n]
+        if (base == server_dso || dso ~ /\/server$/) {
+            return "server"
+        }
+        if (dso ~ /ld-linux|ld\.so/) {
+            return "ldso"
+        }
+        return "other"
+    }
+    function is_kernel_dso(dso) {
+        return (dso ~ /\[kernel\.kallsyms\]|vmlinux|\[kernel\]|kallsyms/)
+    }
+    function is_libc_dso(dso) {
+        return (dso ~ /libc\.|\/libc-/)
+    }
+    function kernel_category(sym,    s) {
+        s = kern_base(sym)
+        if (s ~ /^__x64_sys_|^__arm64_sys_|^__se_sys_|^__do_sys_|^__do_compat_sys_|^syscall|^do_syscall_64$|^x64_sys_call$|^ksys_/) {
+            return "syscall"
+        }
+        if (s ~ /^tcp_|^udp_|^ip_|^sock_|^sk_|^netif_|^dev_hard_start_xmit|^loopback_xmit|^eth_|^napi_|^inet_|^nf_|^net_rx_action$|^__dev_queue_xmit$|^process_backlog$/) {
+            return "network"
+        }
+        if (s ~ /^futex|^do_futex|^get_futex_key/) {
+            return "futex"
+        }
+        if (s ~ /^schedule$|^__schedule|^context_switch|^rq_|^pick_next_task|^finish_task_switch/) {
+            return "sched"
+        }
+        return "other"
     }
     function sort_order(pct, order, nout,    i, j, t) {
         for (i = 1; i <= nout; i++) {
@@ -686,167 +478,229 @@ append_kernel_initiator_table() {
             }
         }
     }
-    {
-        wt = $2 + 0
-        if (wt <= 0) {
-            wt = 1
+    function top_syms_for_cat(cat,    s, n, i, line) {
+        n = 0
+        for (s in ksym_self) {
+            if (kernel_category(s) != cat) {
+                continue
+            }
+            order_t[++n] = s
+            pct_t[s] = ksym_self[s]
         }
-        total_samples += wt
-        n = split($1, frames, ";")
-        if (!stack_has_kernel(frames, n)) {
-            pure_user += wt
-            next
+        if (n == 0) {
+            return "-"
         }
-        apair = find_api(frames, n)
-        split(apair, aparts, SUBSEP)
-        api = aparts[1]
-        api_idx = aparts[2] + 0
-        if (api == "") {
-            no_api += wt
-            orphan_wrap = find_wrapper(frames, n, 0)
-            orphan_wt[orphan_wrap] += wt
-            next
+        sort_order(pct_t, order_t, n)
+        if (n > 3) {
+            n = 3
         }
-        wrapper = find_wrapper(frames, n, api_idx)
-        pair_key = wrapper SUBSEP api
-        pair_wt[pair_key] += wt
-        api_wt[api] += wt
-        wrap_wt[wrapper] += wt
+        line = ""
+        for (i = 1; i <= n; i++) {
+            if (line != "") {
+                line = line ", "
+            }
+            line = line sym_clean(order_t[i])
+        }
+        delete order_t
+        delete pct_t
+        return line
+    }
+    function ingest_row(allpct, selfpct, dso, sym) {
+        if (dso == "" || !is_dso_token(dso)) {
+            return
+        }
+        b = dso_bucket(dso)
+        bucket_self[b] += selfpct
+        total_self += selfpct
+        if (is_server_dso(dso) && allpct + 0 >= limit + 0) {
+            srv_all[sym] = allpct
+            srv_self[sym] = selfpct
+        }
+        if (is_kernel_dso(dso)) {
+            if (selfpct + 0 > 0) {
+                ksym_self[sym] += selfpct
+            }
+            cat = kernel_category(sym)
+            kcat_self[cat] += selfpct
+        }
+        if (is_libc_dso(dso) && selfpct + 0 > 0) {
+            libsym_self[sym] += selfpct
+        }
+    }
+    BEGIN {
+        hdr = 0
+        current_dso = ""
+        bucket_list = "server kernel libc libpthread libstdc++ vdso ldso other"
+    }
+    /^# (Overhead|Children|All)/ {
+        if ($0 ~ /Shared Object/) {
+            hdr = 1
+        } else if ($0 ~ /Self/) {
+            hdr = 2
+        } else if ($0 ~ /^# Overhead/) {
+            hdr = 3
+        }
+        next
+    }
+    /^# \./ { next }
+    /^# \(Cannot load tips/ { exit }
+    hdr > 0 && /^[[:space:]]+[0-9]/ {
+        if (hdr == 1) {
+            ingest_row(pct_val($1), pct_val($2), $4, sym_from_fields(5))
+        } else if (hdr == 2) {
+            ingest_row(pct_val($1), pct_val($2), current_dso, sym_from_fields(3))
+        } else if (hdr == 3) {
+            ingest_row(pct_val($1), pct_val($1), current_dso, sym_from_fields(2))
+        }
+        next
+    }
+    /^[[:space:]]+[0-9.]+%[[:space:]]+/ && NF == 2 && is_dso_token($2) {
+        current_dso = $2
     }
     END {
-        if (total_samples == 0) {
-            print "# (无调用栈样本；检查 perf.data 是否含 call-graph)"
+        if (total_self <= 0) {
+            print "# (无符号数据；检查 perf.data 与 perf report 表头)"
             exit
         }
-        printf "# Overhead  API           Wrapper\n"
-        np = 0
-        for (k in pair_wt) {
-            pct_p[k] = pair_wt[k] * 100.0 / total_samples
-            if (pct_p[k] + 0 >= limit + 0) {
-                split(k, pp, SUBSEP)
-                pair_wrap[k] = pp[1]
-                pair_api[k] = pp[2]
-                order_p[++np] = k
+        print "# === §0 CPU 预算（互斥）==="
+        print "# 含义: 采样时 PC 落在哪个共享库/模块（Self），每个样本只计一次。"
+        print "# 分母: 全部 CPU 样本（本表各行 Self 相加 ≈ 100%）。"
+        print "# 读法: kernel 高 → 看 §2/§3；server 高 → 看 §1。"
+        print "# Self%   层级"
+        split(bucket_list, bl, " ")
+        nb = 0
+        for (i = 1; i <= 8; i++) {
+            b = bl[i]
+            if (bucket_self[b] + 0 > 0) {
+                order_b[++nb] = b
+                pct_b[b] = bucket_self[b]
             }
         }
-        sort_order(pct_p, order_p, np)
-        if (np == 0) {
-            print "# (无达到阈值的 Wrapper×API 配对；见下方汇总)"
+        sort_order(pct_b, order_b, nb)
+        for (i = 1; i <= nb; i++) {
+            b = order_b[i]
+            printf " %7.2f%%  %s\n", pct_b[b], b
+        }
+        print ""
+        print "# === §1 server（All / Self）==="
+        print "# 含义: server 二进制符号；All=inclusive（含 libc/内核 callee），Self=仅函数体内。"
+        print "# 分母: 全部 CPU 样本。定 src 优化优先级看 All 降序；Self 高表示热点在自身。"
+        print "# 注意: 父子行 All 重叠，各行勿相加；All 与 Self 勿加在同一行。"
+        print "# All      Self  Symbol"
+        ns = 0
+        for (s in srv_all) {
+            order_s[++ns] = s
+            pct_sa[s] = srv_all[s]
+        }
+        sort_order(pct_sa, order_s, ns)
+        if (ns == 0) {
+            print "# (无 ≥ " limit "% 的 server 符号)"
         } else {
-            for (i = 1; i <= np; i++) {
-                k = order_p[i]
-                printf " %7.2f%%  %-12s  %s\n", pct_p[k], pair_api[k], pair_wrap[k]
+            for (i = 1; i <= ns; i++) {
+                s = order_s[i]
+                printf " %7.2f%%  %7.2f%%  %s\n", srv_all[s], srv_self[s], s
             }
         }
-        printf "#\n# --- 按 API 合并（write / readv / epoll_wait …）---\n"
-        printf "# Overhead  API\n"
-        na = 0
-        for (a in api_wt) {
-            pct_a[a] = api_wt[a] * 100.0 / total_samples
-            if (pct_a[a] + 0 >= limit + 0) {
-                order_a[++na] = a
+        print ""
+        print "# === §2 kernel（Self）==="
+        print "# 含义: PC 落在 [kernel.kallsyms] 的样本占比（已去掉 [k] 前缀显示）。"
+        print "# 分母: 全部 CPU 样本。定内核热点看 Self 降序。"
+        print "# Self%   Symbol"
+        nk = 0
+        for (s in ksym_self) {
+            if (ksym_self[s] + 0 >= limit + 0) {
+                order_k[++nk] = s
+                pct_k[s] = ksym_self[s]
             }
         }
-        sort_order(pct_a, order_a, na)
-        for (i = 1; i <= na; i++) {
-            a = order_a[i]
-            printf " %7.2f%%  %s\n", pct_a[a], a
-        }
-        printf "#\n# --- 按 Wrapper 合并（poll / updateChannel / sckToBuffer …）---\n"
-        printf "# Overhead  Wrapper\n"
-        nw = 0
-        for (w in wrap_wt) {
-            pct_w[w] = wrap_wt[w] * 100.0 / total_samples
-            if (pct_w[w] + 0 >= limit + 0) {
-                order_w[++nw] = w
+        sort_order(pct_k, order_k, nk)
+        if (nk == 0) {
+            print "# (无 ≥ " limit "% 的内核符号)"
+        } else {
+            for (i = 1; i <= nk; i++) {
+                s = order_k[i]
+                printf " %7.2f%%  %s\n", pct_k[s], sym_clean(s)
             }
         }
-        sort_order(pct_w, order_w, nw)
-        for (i = 1; i <= nw; i++) {
-            w = order_w[i]
-            printf " %7.2f%%  %s\n", pct_w[w], w
-        }
-        if (no_api + 0 > 0) {
-            printf "#\n# --- 未识别 API（按 Wrapper 汇总）---\n"
-            printf "# Overhead  Wrapper\n"
-            nu = 0
-            for (w in orphan_wt) {
-                pct_u[w] = orphan_wt[w] * 100.0 / total_samples
-                if (pct_u[w] + 0 >= limit + 0) {
-                    order_u[++nu] = w
-                }
+        print ""
+        print "# === §3 kernel 分类（Self，互斥）==="
+        print "# 含义: 内核样本按符号归入 syscall/network/futex/sched/other。"
+        print "# 分母: 全部 CPU 样本；各行 Self 相加 ≈ §0 的 kernel 行。"
+        print "# Self%   类别        代表符号（该类别 Self top3）"
+        split("syscall network futex sched other", cl, " ")
+        nc = 0
+        for (i = 1; i <= 5; i++) {
+            c = cl[i]
+            if (kcat_self[c] + 0 > 0) {
+                order_c[++nc] = c
+                pct_c[c] = kcat_self[c]
             }
-            sort_order(pct_u, order_u, nu)
-            for (i = 1; i <= nu; i++) {
-                w = order_u[i]
-                printf " %7.2f%%  %s\n", pct_u[w], w
-            }
-            if (nu == 0) {
-                for (w in orphan_wt) {
-                    printf " %7.2f%%  %s\n", orphan_wt[w] * 100.0 / total_samples, w
-                }
-            }
-            printf "# 未识别 API 合计: %.2f%%\n", no_api * 100.0 / total_samples
         }
-        printf "#\n"
-        if (pure_user + 0 > 0) {
-            printf "# 纯用户态（栈无内核帧）: %.2f%%\n", pure_user * 100.0 / total_samples
+        sort_order(pct_c, order_c, nc)
+        if (nc == 0) {
+            print "# (无内核样本)"
+        } else {
+            for (i = 1; i <= nc; i++) {
+                c = order_c[i]
+                printf " %7.2f%%  %-10s  %s\n", pct_c[c], c, top_syms_for_cat(c)
+            }
         }
-        printf "# 说明: API=程序员接口(write/read/epoll_wait/mutex…)；Wrapper=项目封装；不看内核/glibc 实现\n"
+        print ""
+        print "# === §4 libc（Self）==="
+        print "# 含义: PC 落在 libc 的样本（read/write/epoll 等，原始符号名）。"
+        print "# 分母: 全部 CPU 样本。与 §1 All 不同：此处不含 server inclusive。"
+        print "# Self%   Symbol"
+        nl = 0
+        for (s in libsym_self) {
+            if (libsym_self[s] + 0 >= limit + 0) {
+                order_l[++nl] = s
+                pct_l[s] = libsym_self[s]
+            }
+        }
+        sort_order(pct_l, order_l, nl)
+        if (nl == 0) {
+            print "# (无 ≥ " limit "% 的 libc 符号)"
+        } else {
+            for (i = 1; i <= nl; i++) {
+                s = order_l[i]
+                printf " %7.2f%%  %s\n", pct_l[s], s
+            }
+        }
     }
-    ' "$folded" >>"$report"
-    rm -f "$folded"
-}
-
-append_user_server_table() {
-    local data="$1" limit="$2" report="$3"
-    local tmp_user server_dso
-    tmp_user="$(mktemp "${report}.user.XXXXXX")"
-    server_dso="$(basename "$SERVER")"
-
-    # 全量 inclusive（不用 --dsos），再筛 server 行，保证 All 含 libc/内核 callees
-    if ! run_perf_report_flat "$data" "$tmp_user" --stdio --sort comm,dso,symbol \
-        --percent-limit "$limit" -g none; then
-        rm -f "$tmp_user"
-        die "perf report (用户态) 失败"
-    fi
-    compact_user_symbol_table "$server_dso" <"$tmp_user" >>"$report"
-    rm -f "$tmp_user"
+    ' "$flat" >>"$report"
 }
 
 generate_report() {
     local data="$1"
-    local base report limit lines
+    local base report limit lines flat
     base="$(artifact_base)"
     report="$ARTIFACTS_DIR/${base}_perf_report.txt"
     limit="$PERF_REPORT_PERCENT_LIMIT"
-    log "perf 符号表 → $report（分层：§1 系统调用 + §2 server，≥ ${limit}%）"
+    flat="$(mktemp "${report}.flat.XXXXXX")"
+
+    log "perf 符号表 → $report（§0～§4，阈值 ≥ ${limit}%）"
+    # 必须与 §1 相同排序，保证每行带 Shared Object（DSO）列；--sort dso,symbol 会缺 DSO 列导致 §0 全落 other
+    if ! run_perf_report_flat "$data" "$flat" --stdio --sort comm,dso,symbol \
+        --percent-limit 0 -g none; then
+        rm -f "$flat"
+        die "perf report (符号表) 失败"
+    fi
+
     {
-        printf '# mini_web_server perf 符号表（分层摘要）\n'
-        printf '# 版本: %s\n' "$base"
+        printf '# %s perf 符号表\n' "$base"
+        printf '# 源文件: %s\n' "$(basename "$data")"
+        printf '# 火焰图: %s_flamegraph.svg\n' "$base"
         printf '#\n'
-        printf '# 结构:\n'
-        printf '#   §1 系统调用 — Wrapper（Epoll::poll…）× API（write/readv/epoll_wait/mutex…）\n'
-        printf '#            仅程序员可见接口；不解析内核/glibc 实现细节\n'
-        printf '#   §2 用户态 (server) — 本程序符号，含 All + Self\n'
+        printf '# 阅读顺序: §0 预算 → §1 server → §2/§3 内核 → §4 libc → SVG 看路径\n'
+        printf '# 全局分母: 全部 CPU 样本（perf record 采样总数）。\n'
+        printf '# 行过滤: §0/§3 不过滤；§1/§2/§4 仅输出 ≥ %s%% 的符号行。\n' "$limit"
         printf '#\n'
-        printf '# §1 口径: Overhead = 该配对样本数 / 全部 perf 样本数\n'
-        printf '# §2 口径: 全量 inclusive 后筛 server 行；All/Overhead 分母为全部样本\n'
-        printf '#   All  = 含子函数 + 内核/ libc 路径的总占比（排序依据）\n'
-        printf '#   Self = 仅 PC 落在该函数 server 体内（参考）\n'
-        printf '# 过滤: >= %s%%  |  -g none（§2 无 |--- 调用树）\n' "$limit"
-        printf '# 调用链: %s_flamegraph.svg\n' "$base"
-        printf '# 原始: %s\n#\n' "$(basename "$data")"
-        printf '# === §1 Wrapper × API（项目封装 → 程序员接口） ===\n'
-        printf '# 例: Epoll::poll→epoll_wait  Buffer::sckToBuffer→readv  enqueueTask→write  enqueue→mutex\n#\n'
     } >"$report"
-    append_kernel_initiator_table "$data" "$limit" "$report"
+    render_unified_perf_report "$flat" "$limit" "$report"
     {
-        printf '\n# === §2 用户态明细 (Shared Object: server) ===\n'
-        printf '# 命令: perf report --sort comm,dso,symbol --percent-limit %s -g none（筛 Shared Object=%s）\n#\n' \
-            "$limit" "$(basename "$SERVER")"
+        printf '\n# 调用链详见: %s_flamegraph.svg\n' "$base"
     } >>"$report"
-    append_user_server_table "$data" "$limit" "$report"
+    rm -f "$flat"
     lines="$(wc -l <"$report" | tr -d ' ')"
     log "符号表: $report (${lines} 行)"
 }
@@ -945,7 +799,7 @@ cmd_run() {
     log "完成 → $ARTIFACTS_DIR"
     log "  wrk:        ${base}_wrk.txt"
     log "  perf.data:  ${base}_perf.data"
-    log "  report:     ${base}_perf_report.txt（§1 系统调用 + §2 server，≥${PERF_REPORT_PERCENT_LIMIT}%）"
+    log "  report:     ${base}_perf_report.txt（§0～§4，≥${PERF_REPORT_PERCENT_LIMIT}%）"
     log "  flamegraph: ${base}_flamegraph.svg（调用链）"
     log "请更新或新建 benchmark_log/${DESIGN_VER}_YYYYMMDD_bench.md（wrk + perf 同一份）"
 

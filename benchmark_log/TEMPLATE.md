@@ -63,28 +63,6 @@ bash scripts/perf_bench.sh -v v10.0   # 脚本内 RelWithDebInfo 重编
 
 > **2 核 2 GiB 环境**：`-c` 不超过 20；勿用 `-c50` / `-c100`（见 `README.md`）。
 
-### 4.1 参数说明
-
-| 场景 | `-t` | `-c` | `-d` | 其他 |
-|------|------|------|------|------|
-| Keep-Alive 热身 | 1 | 10 | 5s | 首次 / 换版本后 |
-| Keep-Alive 基线 | 1～2 | 10～20 | 10～30s | 默认 |
-| Keep-Alive + perf | 2 | 20 | 30s | 与 perf 同跑，RPS 不与 §4 纯 wrk 比 |
-| 短连接 | 1 | 5～10 | 5～10s | `-H "Connection: close"` |
-
-### 4.2 执行命令
-
-```bash
-wrk -t2 -c20 -d30s http://127.0.0.1:8888/
-```
-
-### 4.3 原始输出
-
-```text
-（粘贴 wrk 完整终端输出）
-```
-
-### 4.4 结果汇总
 
 | 场景 | -t | -c | -d | RPS | Latency avg | Latency max | Errors | 备注 |
 |------|----|----|-----|-----|-------------|-------------|--------|------|
@@ -109,52 +87,39 @@ bash scripts/perf_bench.sh -v v10.0
 | 构建类型 | RelWithDebInfo |
 | 并发 wrk | `wrk -t2 -c20 -d30s http://127.0.0.1:8888/` |
 | 采样时长 | 30s |
-| 符号表 | `benchmark_log/artifacts/{版本}_perf_report.txt`（§1 内核边界 + §2 server All/Self，≥ 0.1%） |
+| 符号表 | `benchmark_log/artifacts/{版本}_perf_report.txt`（§0～§4；§1/§2/§4 符号行 ≥ 0.1%） |
 | 火焰图 | `benchmark_log/artifacts/{版本}_flamegraph.svg` |
 | perf.data | `benchmark_log/artifacts/{版本}_perf.data` |
 
-### 5.3 wrk（与 perf 同跑，可选）
 
-| 场景 | -t | -c | -d | RPS | Latency avg | Errors | 备注 |
-|------|----|----|-----|-----|-------------|--------|------|
-| KA + perf | 2 | 20 | 30s | | | | 不与 §4 纯 wrk 严格对比 |
+### 5.3 热点摘要
 
-### 5.4 热点摘要
+> 符号表：**§0 CPU 预算（Self 互斥）→ §1 server（All 定优先级）→ §2/§3 kernel → §4 libc**。调用链看火焰图。
 
-> 符号表分两层：§1 内核边界（syscall 入口，占全部样本 %）；§2 server 按 **All**（含子函数 **与内核路径**，inclusive）排序，**Self** 仅 server 体内。调用链看火焰图。
+**§0 预算（Self）**
 
-| 占比（约） | 符号 / 函数 | 说明 |
-|------------|-------------|------|
-| | | （§1 内核入口 或 §2 server 符号） |
+| Self | 层级 | 说明 |
+|------|------|------|
+| | kernel / libc / server / … | |
 
-### 5.5 符号表摘录（可选）
+**§1 server（All / Self）**
 
-```text
-（粘贴 perf_report.txt §1 或 §2 中占比最高的若干行）
-```
+| All | Self | 符号 | 说明 |
+|-----|------|------|------|
+| | | | |
 
----
+**§3 内核分类（Self）**
 
-## 6. 优化对比（可选）
+| Self | 类别 | 代表符号 |
+|------|------|----------|
+| | syscall / network / futex / sched / other | |
 
-| 场景 | 对照 RPS | 本次 RPS | 说明 |
-|------|----------|----------|------|
-| KA -t2 -c20 -d30s | | | |
 
 ---
 
-## 7. 结论与下一步
+## 6. 分析结果
 
 - **结论**：
 - **异常**：
 - **下一步**：
 
----
-
-## 8. 附录（可选）
-
-```bash
-top -H -p $(pgrep -x server)
-mpstat 1 5
-ss -s
-```
