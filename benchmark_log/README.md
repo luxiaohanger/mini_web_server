@@ -240,11 +240,11 @@ mkdir -p benchmark_log/artifacts
 **符号表（分层）**
 
 - **§1 内核态**：`perf script` + `stackcollapse-perf.pl --kernel`，从最外层 caller 向里找 **第一个** `_[k]` 内核符号（等价于用户→内核边界），**不含**更深层 `do_*` / `tcp_*`。
-- **§2 用户态 (server)**：`perf report --sort symbol --dsos=server -g none`（inclusive，**不用** `--no-children`）。
+- **§2 用户态 (server)**：`perf report --sort comm,dso,symbol -g none` **全量 inclusive** 后筛 `Shared Object=server`（**不用** `--dsos=server`，避免 All 不含内核路径）。
 - **§2 表头**：报告内精简为 **`All / Self / Symbol` 三列**（脚本去掉 perf IPC 宽表与点线分隔）；perf 原始列名 Children 归一为 All。
 - **All 与 Self**（§2，分母均为 **全部 perf 样本**）：
-  - **All**：栈上 **经过** 该函数及其子函数的样本占比（含 callees；定优化优先级 **看此列**）
-  - **Self**：PC **仅落在该函数体内** 的样本占比（不含 callees；判断热点在自身还是下游）
+  - **All**：栈上 **经过** 该 server 函数及其 **全部 callees**（含 **libc、内核 syscall 路径**）的样本占比；定优化优先级 **看此列**
+  - **Self**：PC **仅落在该 server 函数体内** 的样本占比（**不含**子函数与内核）；判断热点在自身还是下游
   - **勿** 将同一行的 Self + All 相加；**勿** 将表中各行百分比相加（父子行重叠计数）
 - **读法**：§1 判断 syscall/内核入口占比；§2 定 src 优化优先级；`invoke`/`lambda` 多为 `std::function` 间接调用。
 - **`PERF_REPORT_PERCENT_LIMIT`** 可调阈值（默认 `0.1`）；完整调用链见火焰图。

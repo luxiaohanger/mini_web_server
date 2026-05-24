@@ -275,15 +275,43 @@ run_sample() {
     PERF_DATA="$perf_out"
 }
 
+# 将 perf script（含调用栈）写入文件；优先 -F/-f trace，不可用时回退默认（与火焰图同口径）
+perf_script_with_stacks() {
+    local data="$1" dest="$2"
+    local err="${dest}.err"
+    local fields=comm,pid,tid,cpu,time,event,ip,sym,dso,trace
+
+    if perf_cmd script -i "$data" -F "$fields" >"$dest" 2>"$err"; then
+        rm -f "$err"
+        return 0
+    fi
+    if perf_cmd script -i "$data" -f "$fields" >"$dest" 2>"$err"; then
+        log "perf script 使用 -f 字段格式（本机不支持 -F trace）"
+        rm -f "$err"
+        return 0
+    fi
+    if perf_cmd script -i "$data" >"$dest" 2>"$err"; then
+        log "perf script 使用默认输出（本机不支持 trace 字段，与火焰图相同）"
+        rm -f "$err"
+        return 0
+    fi
+    warn "perf script stderr: $(head -5 "$err" 2>/dev/null || true)"
+    rm -f "$err"
+    return 1
+}
+
 generate_flamegraph() {
     local data="$1"
-    local base svg
+    local base svg tmp
     base="$(artifact_base)"
     svg="$ARTIFACTS_DIR/${base}_flamegraph.svg"
     [[ -f "$data" ]] || die "perf.data 不存在: $data"
     ensure_flamegraph
     log "生成火焰图 → $svg"
-    perf_cmd script -i "$data" | stackcollapse-perf.pl | flamegraph.pl >"$svg"
+    tmp="$(mktemp "${svg}.script.XXXXXX")"
+    perf_script_with_stacks "$data" "$tmp" || die "perf script 失败"
+    stackcollapse-perf.pl <"$tmp" | flamegraph.pl >"$svg"
+    rm -f "$tmp"
     log "火焰图: $svg ($(wc -c <"$svg" | tr -d ' ') bytes)"
 }
 
@@ -319,45 +347,72 @@ extract_perf_table() {
     ' "$file"
 }
 
-# §2 精简为 All / Self / Symbol 三列（去掉 perf IPC 宽表与点线分隔）
+# §2 精简为 All / Self / Symbol；只保留 server DSO 行（All 来自全量 inclusive，含内核路径）
 compact_user_symbol_table() {
-    awk '
-        BEGIN { hdr = 0 }
-        /^# (Overhead|Children|All)/ {
-            if ($0 ~ /Self/) {
-                print "# All      Self  Symbol"
-                hdr = 1
-            } else if ($0 ~ /^# Overhead/) {
-                print "# All      Self  Symbol"
-                hdr = 2
-            }
+    local server_dso="${1:-server}"
+    awk -v server_dso="$server_dso" '
+    function is_server_dso(dso,    n, base) {
+        if (dso == server_dso) {
+            return 1
+        }
+        n = split(dso, parts, "/")
+        base = parts[n]
+        return (base == server_dso)
+    }
+    BEGIN { hdr = 0 }
+    /^# (Overhead|Children|All)/ {
+        if ($0 ~ /Shared Object/) {
+            print "# All      Self  Symbol"
+            hdr = 1
+        } else if ($0 ~ /Self/) {
+            print "# All      Self  Symbol"
+            hdr = 2
+        } else if ($0 ~ /^# Overhead/) {
+            print "# All      Self  Symbol"
+            hdr = 3
+        }
+        next
+    }
+    /^# \./ { next }
+    /^# \(Cannot load tips/ { exit }
+    hdr == 1 && /^[[:space:]]+[0-9]/ {
+        if (!is_server_dso($4)) {
             next
         }
-        /^# \./ { next }
-        /^# \(Cannot load tips/ { exit }
-        hdr == 1 && /^[[:space:]]+[0-9]/ {
-            sym = $3
-            for (i = 4; i <= NF; i++) {
-                if ($i == "-" && i < NF && $(i + 1) == "-") {
-                    break
-                }
-                sym = sym " " $i
+        sym = $5
+        for (i = 6; i <= NF; i++) {
+            if ($i == "-" && i < NF && $(i + 1) == "-") {
+                break
             }
-            sub(/^\[\.\][[:space:]]+/, "", sym)
-            printf " %7s  %7s  %s\n", $1, $2, sym
-            next
+            sym = sym " " $i
         }
-        hdr == 2 && /^[[:space:]]+[0-9]/ {
-            sym = $2
-            for (i = 3; i <= NF; i++) {
-                if ($i == "-" && i < NF && $(i + 1) == "-") {
-                    break
-                }
-                sym = sym " " $i
+        sub(/^\[\.\][[:space:]]+/, "", sym)
+        printf " %7s  %7s  %s\n", $1, $2, sym
+        next
+    }
+    hdr == 2 && /^[[:space:]]+[0-9]/ {
+        sym = $3
+        for (i = 4; i <= NF; i++) {
+            if ($i == "-" && i < NF && $(i + 1) == "-") {
+                break
             }
-            sub(/^\[\.\][[:space:]]+/, "", sym)
-            printf " %7s  %7s  %s\n", $1, "0.00%", sym
+            sym = sym " " $i
         }
+        sub(/^\[\.\][[:space:]]+/, "", sym)
+        printf " %7s  %7s  %s\n", $1, $2, sym
+        next
+    }
+    hdr == 3 && /^[[:space:]]+[0-9]/ {
+        sym = $2
+        for (i = 3; i <= NF; i++) {
+            if ($i == "-" && i < NF && $(i + 1) == "-") {
+                break
+            }
+            sym = sym " " $i
+        }
+        sub(/^\[\.\][[:space:]]+/, "", sym)
+        printf " %7s  %7s  %s\n", $1, "0.00%", sym
+    }
     '
 }
 
@@ -387,23 +442,16 @@ run_perf_report_flat() {
 
 append_kernel_boundary_table() {
     local data="$1" limit="$2" report="$3"
-    local tmp folded err sc_err
+    local tmp folded sc_err
     ensure_flamegraph
     tmp="$(mktemp "${report}.script.XXXXXX")"
     folded="$(mktemp "${report}.folded.XXXXXX")"
-    err="${tmp}.err"
     sc_err="${tmp}.sc.err"
 
-    if ! perf_cmd script -i "$data" \
-        -F comm,pid,tid,cpu,time,event,ip,sym,dso,trace >"$tmp" 2>"$err"; then
-        warn "perf script -F trace 不可用，回退默认 script 输出"
-        if ! perf_cmd script -i "$data" >"$tmp" 2>"$err"; then
-            warn "perf script stderr: $(head -5 "$err" 2>/dev/null || true)"
-            rm -f "$tmp" "$folded" "$err" "$sc_err"
-            die "perf script (内核边界) 失败"
-        fi
+    if ! perf_script_with_stacks "$data" "$tmp"; then
+        rm -f "$tmp" "$folded" "$sc_err"
+        die "perf script (内核边界) 失败"
     fi
-    rm -f "$err"
 
     if ! stackcollapse-perf.pl --kernel <"$tmp" >"$folded" 2>"$sc_err"; then
         warn "stackcollapse-perf.pl stderr: $(head -5 "$sc_err" 2>/dev/null || true)"
@@ -468,35 +516,18 @@ append_kernel_boundary_table() {
 
 append_user_server_table() {
     local data="$1" limit="$2" report="$3"
-    local tmp_user tmp_all
+    local tmp_user server_dso
     tmp_user="$(mktemp "${report}.user.XXXXXX")"
+    server_dso="$(basename "$SERVER")"
 
-    if run_perf_report_flat "$data" "$tmp_user" --stdio --sort symbol --percent-limit "$limit" \
-        -g none --dsos=server; then
-        compact_user_symbol_table <"$tmp_user" >>"$report"
-        rm -f "$tmp_user"
-        return 0
-    fi
-
-    warn "perf --dsos=server 不可用，从全量表筛选 server 行"
-    tmp_all="$(mktemp "${report}.all.XXXXXX")"
-    if ! run_perf_report_flat "$data" "$tmp_all" --stdio --sort comm,dso,symbol \
+    # 全量 inclusive（不用 --dsos），再筛 server 行，保证 All 含 libc/内核 callees
+    if ! run_perf_report_flat "$data" "$tmp_user" --stdio --sort comm,dso,symbol \
         --percent-limit "$limit" -g none; then
-        rm -f "$tmp_user" "$tmp_all"
+        rm -f "$tmp_user"
         die "perf report (用户态) 失败"
     fi
-    awk '
-        /^# (Overhead|Children)/ {
-            if ($0 ~ /^# Children/) {
-                sub(/^# Children/, "# All")
-            }
-            print
-            hdr = 1
-            next
-        }
-        hdr && /^[[:space:]]+[0-9]/ && $0 ~ /[[:space:]]server[[:space:]]/ { print }
-    ' "$tmp_all" | compact_user_symbol_table >>"$report"
-    rm -f "$tmp_user" "$tmp_all"
+    compact_user_symbol_table "$server_dso" <"$tmp_user" >>"$report"
+    rm -f "$tmp_user"
 }
 
 generate_report() {
@@ -516,9 +547,9 @@ generate_report() {
         printf '#   §2 用户态 (server) — 本程序符号，含 All + Self\n'
         printf '#\n'
         printf '# §1 口径: Overhead = 该边界符号样本数 / 全部 perf 样本数\n'
-        printf '# §2 口径: inclusive（未使用 --no-children）；All/Overhead 分母同为全部样本\n'
-        printf '#   All  = 含子函数的总占比（排序依据；perf 原始列名 Children）\n'
-        printf '#   Self = 仅函数自身（参考）；勿把 Self+All 相加\n'
+        printf '# §2 口径: 全量 inclusive 后筛 server 行（不用 --dsos）；All/Overhead 分母为全部样本\n'
+        printf '#   All  = 含子函数 + 内核/ libc 路径的总占比（排序依据；perf 原始列名 Children）\n'
+        printf '#   Self = 仅 PC 落在该函数 server 体内（参考）；勿把 Self+All 相加\n'
         printf '# 过滤: >= %s%%  |  -g none（§2 无 |--- 调用树）\n' "$limit"
         printf '# 调用链: %s_flamegraph.svg\n' "$base"
         printf '# 原始: %s\n#\n' "$(basename "$data")"
@@ -528,7 +559,8 @@ generate_report() {
     append_kernel_boundary_table "$data" "$limit" "$report"
     {
         printf '\n# === §2 用户态明细 (Shared Object: server) ===\n'
-        printf '# 命令: perf report --sort symbol --dsos=server --percent-limit %s -g none\n#\n' "$limit"
+        printf '# 命令: perf report --sort comm,dso,symbol --percent-limit %s -g none（筛 Shared Object=%s）\n#\n' \
+            "$limit" "$(basename "$SERVER")"
     } >>"$report"
     append_user_server_table "$data" "$limit" "$report"
     lines="$(wc -l <"$report" | tr -d ' ')"

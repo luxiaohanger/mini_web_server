@@ -275,14 +275,14 @@ BUILD_JOBS=2 bash scripts/perf_bench.sh -v v10.0
 | 段落 | 方法 |
 |------|------|
 | **§1 内核态** | `perf script -F …,trace` + `stackcollapse-perf.pl --kernel` → 每栈第一个 `_[k]` 符号 |
-| **§2 用户态** | `perf report --sort symbol --dsos=server --percent-limit 0.1 -g none`（inclusive） |
+| **§2 用户态** | `perf report --sort comm,dso,symbol -g none` 全量 inclusive → 筛 `Shared Object=server` |
 
 | 要点 | 说明 |
 |------|------|
 | **§1** | 一行一个 **syscall/内核入口**（如 `__x64_sys_epoll_wait`），非整段 `[kernel.kallsyms]` 一行，也非 `do_*`/`tcp_*` 内部 |
 | **§2 inclusive** | **不用** `--no-children`；报告表头 **All**（perf 原始列名 Children）；旧版仅 Overhead 时语义同 All |
 | **§2 flat** | **`-g none`** → 无 `\|---` 树 |
-| **§2 读列** | **All** = 含子函数（排序依据）；**Self** = 仅函数自身；分母均为全部 perf 样本 |
+| **§2 读列** | **All** = 含子函数 **及内核/libc 路径**（排序依据）；**Self** = 仅 server 函数体内；分母均为全部 perf 样本 |
 | **读法** | §1 看内核入口；§2 按 All 定 src 优先级；调用链看 SVG |
 
 结论写入 `benchmark_log/{版本}_{YYYYMMDD}_bench.md` §5（模板见 `benchmark_log/TEMPLATE.md`）。
