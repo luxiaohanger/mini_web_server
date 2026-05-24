@@ -11,6 +11,7 @@ class MainReactor;
 
 class Server {
    private:
+    bool useThreadPool;
     std::unique_ptr<ThreadPool> threadpool;
     std::unique_ptr<MainReactor> mainReactor;
     std::vector<std::unique_ptr<SubReactor>> SubReactors;
@@ -18,7 +19,7 @@ class Server {
     void handleNewConnection(Socket* sck);
 
    public:
-    Server();
+    Server(bool);
     ~Server();
 
     void listenPort(int port);

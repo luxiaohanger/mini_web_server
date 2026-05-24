@@ -12,8 +12,9 @@
 #include "Socket.h"
 #include "error_solve.h"
 
-Connection::Connection(EventLoop* eloop, std::unique_ptr<Socket> sock)
+Connection::Connection(EventLoop* eloop, std::unique_ptr<Socket> sock, bool f)
     : eloop(eloop),
+      useThreadPool(f),
       sck(std::move(sock)),
       state(ConnState::connected),
       working(0),
@@ -113,18 +114,27 @@ void Connection::onHttp() {
 
         // kComplete — 合法 GET
         HttpRequest req = httpProcess_->releaseRequest();
-        working++;
-        process([self, req = std::move(req)]() {
+
+        if (useThreadPool) {
+            working++;
+            process([self, req = std::move(req)]() {
+                std::string resp = HttpProcess::buildResponse(req);
+                const bool keepAlive = req.keepAlive;
+                self->eloop->enqueueTask(
+                    [self, resp = std::move(resp), keepAlive]() {
+                        self->working--;
+                        if (self->state == ConnState::dead) return;
+                        self->sendHttpOnLoop(resp, keepAlive);
+                        self->checkEmptyReadAfterEof();
+                    });
+            });
+        } else {
             std::string resp = HttpProcess::buildResponse(req);
-            const bool keepAlive = req.keepAlive;
-            self->eloop->enqueueTask(
-                [self, resp = std::move(resp), keepAlive]() {
-                    self->working--;
-                    if (self->state == ConnState::dead) return;
-                    self->sendHttpOnLoop(resp, keepAlive);
-                    self->checkEmptyReadAfterEof();
-                });
-        });
+            if (self->state == ConnState::dead) return;
+            self->sendHttpOnLoop(resp, req.keepAlive);
+            self->checkEmptyReadAfterEof();
+        }
+
         // 粘包：继续 while，不在此 break
     }
 }

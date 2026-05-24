@@ -5,16 +5,34 @@
 #include "Socket.h"
 #include "error_solve.h"
 
-SubReactor::SubReactor() { eloop = std::make_unique<EventLoop>(); }
+SubReactor::SubReactor(bool f) : useThreadPool(f) {
+    eloop = std::make_unique<EventLoop>();
+}
 
 SubReactor::~SubReactor() {}
 
 void SubReactor::addConnection(
     Socket* sck, std::function<void(std::function<void()>)> taskSubmit) {
     eloop->enqueueTask([this, sck, taskSubmit]() {
-        auto conn = std::make_shared<Connection>(eloop.get(),
-                                                 std::unique_ptr<Socket>(sck));
+        auto conn = std::make_shared<Connection>(
+            eloop.get(), std::unique_ptr<Socket>(sck), useThreadPool);
         conn->setProcess(taskSubmit);
+        conn->setRemoveConnectionCallBack(
+            [this](Socket* sc) { Connections.erase(sc); });
+        conn->setAddTimerCallBack([this, conn]() {
+            return eloop->addTimer([conn]() { conn->handleDead(); });
+        });
+        conn->setDeleteTimerCallBack(
+            [this](int id) { eloop->deleteTimer(id); });
+        Connections[sck] = conn;
+        conn->startConnect();
+    });
+}
+
+void SubReactor::addConnection(Socket* sck) {
+    eloop->enqueueTask([this, sck]() {
+        auto conn = std::make_shared<Connection>(
+            eloop.get(), std::unique_ptr<Socket>(sck), useThreadPool);
         conn->setRemoveConnectionCallBack(
             [this](Socket* sc) { Connections.erase(sc); });
         conn->setAddTimerCallBack([this, conn]() {

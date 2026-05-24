@@ -1,6 +1,7 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstring>
 #include <iostream>
 #include <thread>
 
@@ -18,12 +19,30 @@ void onStopSignal(int /*signo*/) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char* argv[]) {
     // Ctrl+C → SIGINT；kill 默认 → SIGTERM
     std::signal(SIGINT, onStopSignal);
     std::signal(SIGTERM, onStopSignal);
 
-    Server s;
+    bool threadpool = false;  // 默认 off
+
+    if (argc == 1) {
+        // 无参数，用默认
+    } else if (argc == 3 && std::strcmp(argv[1], "-t") == 0) {
+        if (std::strcmp(argv[2], "on") == 0) {
+            threadpool = true;
+        } else if (std::strcmp(argv[2], "off") == 0) {
+            threadpool = false;
+        } else {
+            std::cerr << "用法: " << argv[0] << " [-t on|off]\n";
+            return 1;
+        }
+    } else {
+        std::cerr << "用法: " << argv[0] << " [-t on|off]\n";
+        return 1;
+    }
+
+    Server s(threadpool);
     s.listenPort(8888);
 
     // 启动 MainReactor / SubReactor I/O 线程，立即返回

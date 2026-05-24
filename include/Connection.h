@@ -13,6 +13,7 @@ enum class ConnState { connected, peerClose, dead };
 
 class Connection : public std::enable_shared_from_this<Connection> {
    private:
+    bool useThreadPool;
     EventLoop* eloop;
     std::unique_ptr<Socket> sck;
     std::unique_ptr<Channel> channel;
@@ -55,7 +56,7 @@ class Connection : public std::enable_shared_from_this<Connection> {
     void checkEmptyReadAfterEof();
 
    public:
-    Connection(EventLoop* eloop, std::unique_ptr<Socket> sck);
+    Connection(EventLoop* eloop, std::unique_ptr<Socket> sck, bool f);
     ~Connection();
 
     void setProcess(std::function<void(std::function<void()>)> process) {
