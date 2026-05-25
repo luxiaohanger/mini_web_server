@@ -342,3 +342,16 @@
 - 修复：改为 `std::copy(buf.begin() + readIdx, buf.begin() + readIdx + count, peer->buf.begin() + peer->writeIdx)`，与 `readIdx += count` 语义一致。
 - 验证建议：构造 `readable() > count` 的源 buffer，调用 `bufToBuf` 后检查对端仅增加 `count` 字节、源端 `readable()` 减少 `count`；当前业务路径未调用该接口，属 API 正确性修复，后续 buffer 间搬运或重构可安全依赖。
 
+## FIX-035 `onHttp` 解析循环与 `handleWriteCallBack` 入口 `dead` 守卫
+
+- 修复日期：2026-05-25
+- 状态：Fixed
+- 位置：`src/server/Connection.cpp` `onHttp()`（约 95–96 行）、`handleWriteCallBack()`（约 175–176 行）
+- 现象：
+  - `readFromSck()` 内已 `handleDead()` 后，`onHttp` 的 `while` 仍可能 `parse`、走 `kError` 分支 `sendHttpOnLoop(build400())` 等路径（**FIX-030** 仅覆盖线程池回投，非线程池 `kComplete` 在约 134 行另有守卫，解析/400 路径此前无统一短路）。
+  - 同一次 `Channel::handle()` 中 `readCallBack` 已将连接置 `dead` 后，`writeCallBack` 仍会执行：`refreshTimer()` 可能给已死连接重新挂 idle timer，并进入写循环。
+- 修复：
+  - `onHttp` 粘包解析 `while` 每轮开头 `if (self->state == ConnState::dead) return;`（覆盖 `kError` / 粘包等所有循环内出口）。
+  - `handleWriteCallBack` 在 `refreshTimer()` 之前 `if (state == ConnState::dead) return;`（对齐同轮 read 已 dead 仍可能带 `EPOLLOUT` 的 epoll 语义）。
+- 验证：读致命错误后 buffer 仍有残留时不发 400/不继续 parse；同一 `handle` 内 `EPOLLIN|EPOLLOUT` 且 read 路径已 `handleDead` 时 write 不再 `refreshTimer` 也不写 socket。
+
